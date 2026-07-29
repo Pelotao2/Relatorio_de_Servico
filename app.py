@@ -1,18 +1,14 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import re
-import difflib
-import unicodedata
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 import time
+import json
 import re
 import difflib
-import unicodedata
-import json
 from datetime import datetime, timedelta
 
 # --- SISTEMA DE AUTENTICAÇÃO ---
@@ -117,6 +113,10 @@ st.markdown("""
         .stButton, .stDownloadButton, #MainMenu, footer {
             display: none !important;
         }
+        body, p, span, div, label { font-size: 11px !important; }
+        h1 { font-size: 18px !important; }
+        h2, h3 { font-size: 14px !important; }
+        h4, h5, h6, .stMarkdown strong { font-size: 12px !important; }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -171,6 +171,7 @@ def listar_relatorios_em_andamento(unidade):
         return registros
     except Exception:
         return []
+
 def buscar_relatorios(unidade, termo):
     """Busca relatórios (qualquer status) por Nº do relatório ou nome do
     comandante, restrito à unidade operacional atual. Usado para localizar
@@ -191,7 +192,6 @@ def buscar_relatorios(unidade, termo):
         return registros
     except Exception:
         return []
-
 
 def salvar_relatorio(colunas_valores: dict, id_existente=None):
     """Grava o relatório no banco: insere um novo registro (dia 1) ou atualiza
@@ -332,6 +332,7 @@ MATRICULAS = {
     "Cabo PM Luiz Henrique da Silva Ferreira": "",
     "Cabo PM Thiago David Mareco de Souza": ""
 }
+
 # ==========================================
 # FUNÇÕES AUXILIARES: DITADO POR VOZ (TRANSCRIÇÃO LOCAL, SEM API PAGA)
 # ==========================================
@@ -356,141 +357,6 @@ def transcrever_audio(audio_bytes):
         caminho_tmp = tmp.name
     segments, _ = modelo.transcribe(caminho_tmp, language="pt")
     return " ".join(seg.text.strip() for seg in segments).strip()
-def _normalizar_texto(txt):
-    """Remove acentos e deixa em minúsculas para comparação mais tolerante."""
-    if not txt:
-        return ""
-    nfkd = unicodedata.normalize("NFKD", txt)
-    sem_acento = "".join(c for c in nfkd if not unicodedata.combining(c))
-    return sem_acento.lower().strip()
-
-def identificar_policial(trecho_falado, unidade):
-    """Casa um trecho de fala (ex: 'sargento madson') com um nome do efetivo
-    cadastrado para a unidade. Retorna o nome completo ou None."""
-    if not trecho_falado:
-        return None
-    lista = EFETIVO.get(unidade, [])
-    alvo = _normalizar_texto(trecho_falado)
-    melhor_nome, melhor_pontuacao = None, 0.0
-    for nome in lista:
-        nome_norm = _normalizar_texto(nome)
-        pontuacao = difflib.SequenceMatcher(None, alvo, nome_norm).ratio()
-        for palavra in alvo.split():
-            if len(palavra) > 3 and palavra in nome_norm:
-                pontuacao += 0.15
-        if pontuacao > melhor_pontuacao:
-            melhor_pontuacao, melhor_nome = pontuacao, nome
-    return melhor_nome if melhor_pontuacao >= 0.35 else None
-
-def extrair_dados_montagem_equipe(texto, unidade):
-    """Extrai comandante, motorista, viatura e km inicial de uma fala do tipo:
-    'Iniciando o serviço, comandante da equipe Sargento Madson, motorista CB
-    Mareco, a viatura empregada é RWE6B39, km inicial 12000'."""
-    texto_norm = _normalizar_texto(texto)
-
-    def _trecho_entre(inicio_regex, fins_regex):
-        m_ini = re.search(inicio_regex, texto_norm)
-        if not m_ini:
-            return ""
-        pos_ini = m_ini.end()
-        pos_fim = len(texto_norm)
-        for f in fins_regex:
-            m_fim = re.search(f, texto_norm[pos_ini:])
-            if m_fim:
-                pos_fim = min(pos_fim, pos_ini + m_fim.start())
-        return texto_norm[pos_ini:pos_fim].strip(" ,.")
-
-    fins_comuns = [r"\bmotorista\w*\b", r"\bviatura\w*\b", r"\bveiculo\w*\b", r"\bembarcaca\w*\b", r"\bkm\b", r"\bquilometragem\w*\b"]
-
-    trecho_comandante = _trecho_entre(r"\bcomandante\w*\b", fins_comuns)
-    trecho_motorista = _trecho_entre(r"\bmotorista\w*\b", [r"\bviatura\w*\b", r"\bveiculo\w*\b", r"\bembarcaca\w*\b", r"\bkm\b", r"\bquilometragem\w*\b"])
-    trecho_viatura = _trecho_entre(r"\b(viatura|veiculo|embarcaca\w*)\b", [r"\bkm\b", r"\bquilometragem\w*\b"])
-
-    m_km = re.search(r"(?:km|quilometragem)\w*\s*(?:inicial)?\s*(?:e|de|é)?\s*(\d+)", texto_norm)
-    km_inicial = int(m_km.group(1)) if m_km else None
-
-    prefixo_viatura = None
-    if trecho_viatura:
-        m_prefixo = re.search(r"[a-z0-9]{4,8}", trecho_viatura.replace(" ", ""))
-        if m_prefixo:
-            prefixo_viatura = m_prefixo.group(0).upper()
-
-    return {
-        "comandante": identificar_policial(trecho_comandante, unidade),
-        "motorista": identificar_policial(trecho_motorista, unidade),
-        "viatura": prefixo_viatura,
-        "km_inicial": km_inicial,
-        "texto_bruto": texto,
-    }
-
-def montagem_equipe_por_voz(unidade):
-    """Botão de microfone para montar a guarnição por comando de voz. Depois
-    de transcrever, mostra um resumo (texto + áudio) para conferência antes
-    de preencher e salvar a guarnição."""
-    if not VOZ_DISPONIVEL:
-        return
-    with st.expander("🎙️ Montar guarnição por voz", expanded=False):
-        st.caption("Fale, por exemplo: 'Comandante Sargento Madson, motorista CB Mareco, viatura RWE6B39, km inicial 12000'.")
-        geracao = st.session_state.get("audio_geracao_equipe", 0)
-        audio = st.audio_input("Gravar comando de voz", key=f"audio_equipe_{geracao}", label_visibility="collapsed")
-
-        if audio is not None:
-            with st.spinner("Transcrevendo e identificando os dados..."):
-                texto = transcrever_audio(audio.getvalue())
-                dados = extrair_dados_montagem_equipe(texto, unidade) if texto else None
-            st.session_state["audio_geracao_equipe"] = geracao + 1
-            if dados:
-                st.session_state["equipe_voz_pendente"] = dados
-            else:
-                st.warning("Não consegui entender o áudio. Tente novamente falando pausadamente.")
-            st.rerun()
-
-        pendente = st.session_state.get("equipe_voz_pendente")
-        if pendente:
-            st.markdown("**Confira o que foi entendido:**")
-            st.write(f"🗣️ *\"{pendente['texto_bruto']}\"*")
-
-            comandante_confirmado = st.selectbox(
-                "Comandante identificado", EFETIVO[unidade],
-                index=EFETIVO[unidade].index(pendente["comandante"]) if pendente["comandante"] in EFETIVO[unidade] else 0,
-                key="voz_comandante_confirm"
-            )
-            motorista_confirmado = st.selectbox(
-                "Motorista identificado", EFETIVO[unidade],
-                index=EFETIVO[unidade].index(pendente["motorista"]) if pendente["motorista"] in EFETIVO[unidade] else 0,
-                key="voz_motorista_confirm"
-            )
-            viatura_confirmada = st.text_input("Viatura identificada", value=pendente["viatura"] or "", key="voz_viatura_confirm")
-            km_confirmado = st.number_input("KM Inicial identificado", min_value=0, step=1, value=pendente["km_inicial"] or 0, key="voz_km_confirm")
-
-            resumo_falado = (
-                f"Confirmando. Comandante {comandante_confirmado}. "
-                f"Motorista {motorista_confirmado}. Viatura {viatura_confirmada}. "
-                f"Quilometragem inicial {km_confirmado}."
-            )
-            components.html(f"""
-                <script>
-                    const msg = new SpeechSynthesisUtterance({json.dumps(resumo_falado)});
-                    msg.lang = "pt-BR";
-                    window.speechSynthesis.cancel();
-                    window.speechSynthesis.speak(msg);
-                </script>
-            """, height=0)
-
-            col_c1, col_c2 = st.columns(2)
-            with col_c1:
-                if st.button("✅ Confirmar e Salvar Guarnição", use_container_width=True, key="confirmar_equipe_voz"):
-                    st.session_state["comandante_sel"] = comandante_confirmado
-                    st.session_state["motorista_sel"] = motorista_confirmado
-                    st.session_state["viatura_prefixo"] = viatura_confirmada
-                    st.session_state["km_inicial_input"] = int(km_confirmado)
-                    st.session_state["equipe_voz_pendente"] = None
-                    st.session_state["salvar_guarnicao_via_voz"] = True
-                    st.rerun()
-            with col_c2:
-                if st.button("✖️ Descartar", use_container_width=True, key="descartar_equipe_voz"):
-                    st.session_state["equipe_voz_pendente"] = None
-                    st.rerun()
 
 def campo_texto_com_voz(label, key, altura=100, placeholder=None):
     """Campo de texto com botão de ditado por voz ao lado (🎙️). Use no lugar de
@@ -498,7 +364,7 @@ def campo_texto_com_voz(label, key, altura=100, placeholder=None):
     col_txt, col_mic = st.columns([9, 1])
     if VOZ_DISPONIVEL:
         with col_mic:
-            with st.expander("🎙️", expanded=False):
+            with st.popover("🎙️", use_container_width=True):
                 st.caption("Grave sua fala — o texto é transcrito automaticamente.")
                 geracao = st.session_state.get(f"audio_geracao_{key}", 0)
                 audio = st.audio_input("Gravar", key=f"audio_{key}_{geracao}", label_visibility="collapsed")
@@ -518,6 +384,74 @@ def campo_texto_com_voz(label, key, altura=100, placeholder=None):
         valor = st.text_area(label, key=key, height=altura, placeholder=placeholder)
     return valor
 
+def _extrair_trecho(chave, marcadores, texto_lower, texto_original):
+    """Pega o texto entre uma palavra-chave e a próxima palavra-chave conhecida."""
+    idx = texto_lower.find(chave)
+    if idx == -1:
+        return None
+    inicio = idx + len(chave)
+    fim = len(texto_original)
+    for outro in marcadores:
+        if outro == chave:
+            continue
+        idx_outro = texto_lower.find(outro, inicio)
+        if idx_outro != -1 and idx_outro < fim:
+            fim = idx_outro
+    return texto_original[inicio:fim].strip(" :,-")
+
+def _melhor_correspondencia_nome(trecho, nomes_validos):
+    """Casa um trecho de fala (ex.: 'sargento madson') com o nome completo mais
+    parecido da lista do efetivo (ex.: '3º Sargento PM Madson Acosta Flores')."""
+    if not trecho:
+        return None
+    candidatos = difflib.get_close_matches(trecho, nomes_validos, n=1, cutoff=0.3)
+    if candidatos:
+        return candidatos[0]
+    palavras_trecho = [p for p in re.split(r'\s+', trecho.lower()) if len(p) > 2]
+    melhor, melhor_pontos = None, 0
+    for nome in nomes_validos:
+        nome_lower = nome.lower()
+        pontos = sum(1 for p in palavras_trecho if p in nome_lower)
+        if pontos > melhor_pontos:
+            melhor, melhor_pontos = nome, pontos
+    return melhor if melhor_pontos > 0 else None
+
+def _extrair_viatura(trecho):
+    """Procura, dentro do trecho falado, uma palavra com letras E números
+    misturados (formato típico de prefixo/placa, ex.: RWE6B39)."""
+    if not trecho:
+        return None
+    palavras = re.findall(r'[A-Za-z0-9\-]+', trecho)
+    candidatos = [p for p in palavras if re.search(r'[A-Za-z]', p) and re.search(r'\d', p)]
+    if candidatos:
+        return candidatos[0].upper()
+    return palavras[-1].upper() if palavras else None
+
+def interpretar_guarnicao_por_voz(texto, unidade):
+    """Extrai comandante, motorista, viatura e KM inicial de uma frase falada
+    de uma só vez, casando nomes com o efetivo cadastrado da unidade.
+    Retorna um dicionário; campos não identificados vêm como None."""
+    texto_lower = texto.lower()
+    nomes_validos = EFETIVO.get(unidade, [])
+    marcadores = ["comandante", "motorista", "viatura", "prefixo", "km inicial", "quilometragem inicial"]
+
+    trecho_cmt = _extrair_trecho("comandante", marcadores, texto_lower, texto)
+    trecho_mot = _extrair_trecho("motorista", marcadores, texto_lower, texto)
+    trecho_viat = _extrair_trecho("viatura", marcadores, texto_lower, texto) or \
+                  _extrair_trecho("prefixo", marcadores, texto_lower, texto)
+
+    km_inicial = None
+    m_km = re.search(r'km\s*inicial\D{0,6}(\d[\d\.]*)', texto_lower) or \
+           re.search(r'quilometragem\s*inicial\D{0,6}(\d[\d\.]*)', texto_lower)
+    if m_km:
+        km_inicial = int(m_km.group(1).replace(".", ""))
+
+    return {
+        "comandante": _melhor_correspondencia_nome(trecho_cmt, nomes_validos),
+        "motorista": _melhor_correspondencia_nome(trecho_mot, nomes_validos),
+        "viatura": _extrair_viatura(trecho_viat),
+        "km_inicial": km_inicial
+    }
 
 # ==========================================
 # FUNÇÃO AUXILIAR: CAMPO COM MÚLTIPLOS REGISTROS (BOTÃO "+")
@@ -640,8 +574,21 @@ with aba_policial:
         data_ini_sel = st.date_input("Data Inicial do Serviço", value=datetime.now(), key="data_ini_sel")
     with col_u3:
         data_fim_sel = st.date_input("Data Final do Serviço (Jornada 5 dias)", value=data_ini_sel + timedelta(days=5), key="data_fim_sel")
-    montagem_equipe_por_voz(unidade_sel)
+
     st.markdown("#### Guarnição de Serviço")
+
+    # --- APLICA O RESULTADO DA VOZ, SE JÁ CONFIRMADO, ANTES DOS CAMPOS ABAIXO ---
+    if st.session_state.get("voz_guarnicao_aplicar"):
+        _res = st.session_state.pop("voz_guarnicao_aplicar")
+        if _res.get("comandante"):
+            st.session_state["comandante_sel"] = _res["comandante"]
+        if _res.get("motorista"):
+            st.session_state["motorista_sel"] = _res["motorista"]
+        if _res.get("viatura"):
+            st.session_state["viatura_prefixo"] = _res["viatura"]
+        if _res.get("km_inicial") is not None:
+            st.session_state["km_inicial_input"] = _res["km_inicial"]
+
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         comandante_sel = st.selectbox("Comandante da Guarnição", EFETIVO[unidade_sel], key="comandante_sel")
@@ -654,6 +601,42 @@ with aba_policial:
             placeholder="Ex: 123456-7",
             key=f"matricula_{comandante_sel}"
         )
+
+    # --- PREENCHER GUARNIÇÃO INTEIRA POR VOZ, DE UMA VEZ SÓ ---
+    if VOZ_DISPONIVEL:
+        with st.popover("🎙️ Preencher Guarnição por Voz", use_container_width=True):
+            st.caption("Diga tudo de uma vez, por exemplo: *\"Comandante Sargento Madson, motorista CB Mareco, "
+                       "viatura RWE6B39, KM inicial 12000\"*.")
+            geracao_g = st.session_state.get("audio_geracao_guarnicao", 0)
+            audio_guarnicao = st.audio_input("Gravar guarnição", key=f"audio_guarnicao_{geracao_g}", label_visibility="collapsed")
+            if audio_guarnicao is not None:
+                with st.spinner("Transcrevendo e interpretando..."):
+                    texto_guarnicao = transcrever_audio(audio_guarnicao.getvalue())
+                    resultado_voz = interpretar_guarnicao_por_voz(texto_guarnicao, unidade_sel) if texto_guarnicao else None
+                st.session_state["audio_geracao_guarnicao"] = geracao_g + 1
+                st.session_state["voz_guarnicao_transcricao"] = texto_guarnicao
+                st.session_state["voz_guarnicao_resultado"] = resultado_voz
+                st.rerun()
+
+    # --- CONFIRMAÇÃO: mostra o que foi entendido antes de aplicar nos campos ---
+    if st.session_state.get("voz_guarnicao_resultado") is not None:
+        _r = st.session_state["voz_guarnicao_resultado"]
+        with st.container(border=True):
+            st.markdown(f"🎙️ **Ouvi:** _\"{st.session_state.get('voz_guarnicao_transcricao', '')}\"_")
+            st.write(f"**Comandante:** {_r['comandante'] or '⚠️ não identificado'}")
+            st.write(f"**Motorista:** {_r['motorista'] or '⚠️ não identificado'}")
+            st.write(f"**Viatura:** {_r['viatura'] or '⚠️ não identificado'}")
+            st.write(f"**KM Inicial:** {_r['km_inicial'] if _r['km_inicial'] is not None else '⚠️ não identificado'}")
+            col_conf1, col_conf2 = st.columns(2)
+            with col_conf1:
+                if st.button("✅ Confirmar e Preencher", use_container_width=True, key="confirmar_voz_guarnicao"):
+                    st.session_state["voz_guarnicao_aplicar"] = _r
+                    st.session_state["voz_guarnicao_resultado"] = None
+                    st.rerun()
+            with col_conf2:
+                if st.button("🔁 Descartar e Tentar de Novo", use_container_width=True, key="descartar_voz_guarnicao"):
+                    st.session_state["voz_guarnicao_resultado"] = None
+                    st.rerun()
 
     # --- PROTEÇÃO CONTRA TROCA DE GUARNIÇÃO SEM RESET ---
     # Se o comandante selecionado mudou em relação ao serviço carregado na sessão,
@@ -732,19 +715,6 @@ with aba_policial:
             st.success(f"✅ Guarnição salva! Serviço Nº {_id_salvo:04d} em andamento — já pode fechar o sistema com segurança e retomar depois.")
             st.rerun()
 
-    if st.session_state.get("salvar_guarnicao_via_voz"):
-        st.session_state["salvar_guarnicao_via_voz"] = False
-        _dados_guarnicao_voz = montar_dados_parciais(
-        unidade_sel, equipe_sel, finalidade_sel, comandante_sel, motorista_sel,
-        data_ini_sel, data_fim_sel, viatura, km_inicial
-        )
-        _id_voz, _erro_voz = salvar_relatorio(_dados_guarnicao_voz, st.session_state["relatorio_id_atual"])
-        if _erro_voz:
-            st.error(f"Falha ao salvar a guarnição por voz: {_erro_voz}")
-        else:
-            st.session_state["relatorio_id_atual"] = _id_voz
-            st.success(f"✅ Guarnição montada por voz e salva! Serviço Nº {_id_voz:04d} em andamento.")
-            st.rerun()
     st.divider()
 
     # Bloco 03: Captura de Animais
@@ -777,7 +747,7 @@ with aba_policial:
 
         col_anim_txt1, col_anim_txt2 = st.columns(2)
         with col_anim_txt1:
-           destinacao_animal = campo_texto_com_voz("Destinação do Animal (Breve relato)", "destinacao_animal", altura=70) 
+            destinacao_animal = campo_texto_com_voz("Destinação do Animal (Breve relato)", "destinacao_animal", altura=70)
         with col_anim_txt2:
             relato_captura = campo_texto_com_voz("Relato Breve da Captura (Como se deu a ação)", "relato_captura", altura=70)
 
@@ -1357,7 +1327,7 @@ with aba_adm:
                     df['km_rodado'] = 0.0
                     if 'status' in df.columns:
                         _mask_final = df['status'] == 'Finalizado'
-                        df.loc[_mask_final, 'km_rodado'] = pd.to_numeric(df.loc[_mask_final, 'km_final'], errors='coerce').fillna(0) - pd.to_numeric(df.loc[_mask_final,      'km_inicial'], errors='coerce').fillna(0)
+                        df.loc[_mask_final, 'km_rodado'] = pd.to_numeric(df.loc[_mask_final, 'km_final'], errors='coerce').fillna(0) - pd.to_numeric(df.loc[_mask_final, 'km_inicial'], errors='coerce').fillna(0)
                     df['km_rodado'] = df['km_rodado'].clip(lower=0)
                     
                     if 'quantidade_apreendida' in df.columns:
@@ -1512,7 +1482,7 @@ with aba_adm:
                             st.dataframe(df_05[cols_05], use_container_width=True)
                   
                         with tab_unidades:
-                            st.markdown("### ### Comparativo Operacional: 2º Pel Miranda vs GPM Barra")
+                            st.markdown("### Comparativo Operacional: 2º Pel Miranda vs GPM Barra")
 
                             # Unifica os dados para trazer as unidades (Miranda, GPM Barra, etc.)
                             listagem_unidades = []
@@ -1551,7 +1521,7 @@ with aba_adm:
                                 st.info("Dados de unidades não encontrados.")
 
                         with tab_equipes:
-                            st.markdown("### ### Controle de Escala e Produção por Equipes (A, B e C)")
+                            st.markdown("### Controle de Escala e Produção por Equipes (A, B e C)")
 
                             listagem_equipes = []
                             for idx, row in df.iterrows():
