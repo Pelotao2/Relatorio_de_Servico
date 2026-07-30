@@ -40,7 +40,10 @@ def realizar_login(usuario, senha):
 # Isola operacionalmente as duas unidades: cada uma só enxerga/mexe nos próprios
 # serviços no Formulário de Serviço. O Painel Estratégico (Adm) continua vendo as duas.
 if st.session_state["unidade_operacional"] is None:
-    st.title("🪖 Sistema de Controle de Produtividade")
+    col_logo_login, col_vazio_login = st.columns([1, 3])
+    with col_logo_login:
+        st.image("logo_pantanal_folhas.png", width=180)
+    st.title(" Sistema de Controle de Produtividade")
     st.subheader("Selecione sua unidade para continuar")
     col_un_a, col_un_b = st.columns(2)
     with col_un_a:
@@ -83,6 +86,8 @@ if "capturas_animais_list" not in st.session_state:
     st.session_state["capturas_animais_list"] = []
 if "apreensoes_list" not in st.session_state:
     st.session_state["apreensoes_list"] = []
+if "prolepse_list" not in st.session_state:
+    st.session_state["prolepse_list"] = []
 if "relatorio_id_atual" not in st.session_state:
     st.session_state["relatorio_id_atual"] = None
 if "guarnicao_carregada_key" not in st.session_state:
@@ -95,6 +100,10 @@ if "editando_idx_fluvial" not in st.session_state:
     st.session_state["editando_idx_fluvial"] = None
 if "editando_idx_apreensao" not in st.session_state:
     st.session_state["editando_idx_apreensao"] = None
+if "editando_idx_prolepse" not in st.session_state:
+    st.session_state["editando_idx_prolepse"] = None
+if "cautela_itens_temp" not in st.session_state:
+    st.session_state["cautela_itens_temp"] = []
 if "doc_geracao" not in st.session_state:
     st.session_state["doc_geracao"] = 0
 
@@ -133,6 +142,99 @@ def init_connection():
         return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     except Exception as e:
         return None
+
+def buscar_troca_oleo(placa):
+    """Busca o KM da última troca de óleo registrada para a viatura (placa).
+    Retorna 0 se a viatura ainda não tiver nenhum registro."""
+    conn = init_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT ultima_troca_km FROM viaturas WHERE placa = %s;", (placa,))
+        registro = cur.fetchone()
+        cur.close()
+        conn.close()
+        return registro["ultima_troca_km"] if registro else 0
+    except Exception:
+        return 0
+
+def salvar_troca_oleo(placa, km):
+    """Grava (insere ou atualiza) o KM da última troca de óleo de uma viatura."""
+    conn = init_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO viaturas (placa, ultima_troca_km) VALUES (%s, %s) "
+            "ON CONFLICT (placa) DO UPDATE SET ultima_troca_km = EXCLUDED.ultima_troca_km;",
+            (placa, km)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+def criar_cautela(unidade, destinatario, data_cautela, prazo, prazo_indefinido, itens):
+    """Cria uma nova cautela de armamento/munição com um ou mais itens."""
+    conn = init_connection()
+    if not conn:
+        return None, "Sem conexão com o banco de dados."
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO cautelas (unidade, destinatario, data_cautela, prazo, prazo_indefinido, itens, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;",
+            (unidade, destinatario, data_cautela, prazo, prazo_indefinido, json.dumps(itens, ensure_ascii=False), "Em Aberto")
+        )
+        novo_id = cur.fetchone()["id"]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return novo_id, None
+    except Exception as e:
+        conn.close()
+        return None, str(e)
+
+def listar_cautelas_abertas(unidade):
+    """Lista todas as cautelas 'Em Aberto' da unidade — aparecem em todos os
+    relatórios até que o material seja entregue de volta."""
+    conn = init_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM cautelas WHERE unidade = %s AND status = %s ORDER BY id DESC;",
+            (unidade, "Em Aberto")
+        )
+        registros = cur.fetchall()
+        cur.close()
+        conn.close()
+        return registros
+    except Exception:
+        return []
+
+def entregar_cautela(cautela_id, observacao):
+    """Marca uma cautela como entregue (material devolvido), encerrando-a."""
+    conn = init_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE cautelas SET status = %s, observacao_entrega = %s, data_entrega = CURRENT_DATE WHERE id = %s;",
+            ("Entregue", observacao, cautela_id)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 def buscar_relatorio_em_andamento(unidade, comandante):
     """Procura, para a guarnição informada, um relatório com status 'Em Andamento'.
@@ -249,6 +351,10 @@ def carregar_registro_na_sessao(registro_aberto):
     except Exception:
         st.session_state["apreensoes_list"] = []
     try:
+        st.session_state["prolepse_list"] = json.loads(registro_aberto.get("visitas_prolepse") or "[]")
+    except Exception:
+        st.session_state["prolepse_list"] = []
+    try:
         st.session_state["armamento_carregado"] = json.loads(registro_aberto.get("armamento_municao") or "[]") or None
     except Exception:
         st.session_state["armamento_carregado"] = None
@@ -275,6 +381,7 @@ def montar_dados_parciais(unidade, equipe, finalidade, comandante, motorista, da
         "patrulhamento_fluvial": json.dumps(st.session_state.get("patrulhamento_fluvial_list", []), ensure_ascii=False),
         "capturas_animais": json.dumps(st.session_state.get("capturas_animais_list", []), ensure_ascii=False),
         "apreensoes": json.dumps(st.session_state.get("apreensoes_list", []), ensure_ascii=False),
+        "visitas_prolepse": json.dumps(st.session_state.get("prolepse_list", []), ensure_ascii=False),
     }
 
 # Busca automática do próximo número sequencial para controle e busca
@@ -318,19 +425,42 @@ EFETIVO = {
 # Matrícula de cada policial, usada para preencher automaticamente o campo
 # ao selecionar o Comandante da Guarnição. Preencha os que estiverem em branco.
 MATRICULAS = {
-    "1º Tenente PM Gesner Batista Ramos": "",
-    "Subtenente PM Luiz Carlos Cavalieri Silva": "",
-    "1º Sargento PM João Vaz": "",
-    "1º Sargento PM Ronaldo da Silva": "",
-    "2º Sargento PM Rafael Bucinsky Fontes": "",
-    "3º Sargento PM Augusto Graça": "",
-    "3º Sargento PM Macsuel Vilalba Santana": "",
+    "1º Tenente PM Gesner Batista Ramos": "65089021",
+    "Subtenente PM Luiz Carlos Cavalieri Silva": "53859021",
+    "1º Sargento PM João Vaz": "31702021",
+    "1º Sargento PM Ronaldo da Silva": "92954021",
+    "2º Sargento PM Rafael Bucinsky Fontes": "95943021",
+    "3º Sargento PM Augusto Graça": "45808021",
+    "3º Sargento PM Macsuel Vilalba Santana": "117436021",
     "3º Sargento PM Madson Acosta Flores": "25849021",
-    "Cabo PM Edmar Falcão Santana": "",
-    "3º Sargento PM Luiz Alberto Antonieto": "",
-    "3º Sargento PM Diego Aguilera Romeiro": "",
-    "Cabo PM Luiz Henrique da Silva Ferreira": "",
-    "Cabo PM Thiago David Mareco de Souza": ""
+    "Cabo PM Edmar Falcão Santana": "20305021",
+    "3º Sargento PM Luiz Alberto Antonieto": "26999021",
+    "3º Sargento PM Diego Aguilera Romeiro": "31260021",
+    "Cabo PM Luiz Henrique da Silva Ferreira": "426855021",
+    "Cabo PM Thiago David Mareco de Souza": "425383021"
+}
+
+# Placas/prefixos de todas as viaturas e embarcações da unidade.
+# SUBSTITUA pela lista real assim que você tiver as placas em mãos.
+VIATURAS_PLACAS = [
+    "RWE8G14",
+    "Placa Viatura 2",
+    "Placa Viatura 3",
+    "Placa Embarcação 1"
+]
+
+# Catálogo de armamento/munição da unidade: código -> nome/descrição.
+# Usado na Cautela (item 08) para preencher o nome sozinho a partir do código.
+CATALOGO_ARMAMENTO = {
+    "31471": "CARABINA MARCA IMBEL MODELO IMBEL IA2 CALIBRE 5,56 Nº SERIE JFA07424",
+    "21532": "ESPINGARDA MARCA CBC MODELO CBC MILITARY 3.0 RT TACT 12/19\" CALIBRE 12 Nº SERIE KPB4167550",
+    "1626": "FUZIL MARCA FABRIQUE MODELO M964 CALIBRE 7,62 Nº SERIE 26625",
+    "17390": "MUNIÇÃO MARCA CBC CALIBRE .40",
+    "17392": "MUNIÇÃO MARCA CBC CALIBRE 12",
+    "17391": "MUNIÇÃO MARCA CBC CALIBRE 38",
+    "17393": "MUNIÇÃO MARCA CBC CALIBRE 5,56",
+    "17394": "MUNIÇÃO MARCA CBC CALIBRE 7,62",
+    "3736": "PISTOLA MARCA IMBEL MODELO MD7 CALIBRE .40 Nº SERIE EQA01986"
 }
 
 # ==========================================
@@ -506,7 +636,7 @@ with aba_policial:
     with col_tit1:
         col_logo, col_texto_tit = st.columns([1, 6])
         with col_logo:
-            st.image("icone_pelotao_512.png", width=70)
+            st.image("logo_pantanal_folhas.png", width=70)
         with col_texto_tit:
             st.markdown("# RELATÓRIO DE SERVIÇO DIÁRIO OFICIAL")
             st.caption(f"Unidade: **{st.session_state['unidade_operacional']}** — Preencha os campos operacionais da guarnição abaixo.")
@@ -537,7 +667,7 @@ with aba_policial:
     if st.session_state["relatorio_id_atual"] is None:
         servicos_abertos = listar_relatorios_em_andamento(st.session_state["unidade_operacional"])
         if servicos_abertos:
-            st.markdown("##### 🪖 Guarnições com serviço em andamento nesta unidade")
+            st.markdown("##### 🚔 Guarnições com serviço em andamento nesta unidade")
             cols_gu = st.columns(min(len(servicos_abertos), 4))
             for i, reg in enumerate(servicos_abertos):
                 try:
@@ -547,11 +677,11 @@ with aba_policial:
                 dia_exibido = min(max(dias_corridos, 1), 5)
                 nome_curto = (reg.get("comandante") or "").replace("º Sargento PM", "º Sgt").replace("º Tenente PM", "º Ten")
                 with cols_gu[i % len(cols_gu)]:
-                    if st.button(f"🪖 GU SERVIÇO\nNº {reg['id']:04d} — {nome_curto}\nDia {dia_exibido}/5", key=f"gu_servico_{reg['id']}", use_container_width=True):
+                    if st.button(f"🚔 GU SERVIÇO\nNº {reg['id']:04d} — {nome_curto}\nDia {dia_exibido}/5", key=f"gu_servico_{reg['id']}", use_container_width=True):
                         carregar_registro_na_sessao(reg)
                         st.rerun()
     else:
-        st.success(f"🪖 GU em serviço — Nº {st.session_state['relatorio_id_atual']:04d} — Dia em andamento.")
+        st.success(f"🚔 GU em serviço — Nº {st.session_state['relatorio_id_atual']:04d} — Dia em andamento.")
 
     st.divider()
 
@@ -649,6 +779,7 @@ with aba_policial:
         st.session_state["patrulhamento_fluvial_list"] = []
         st.session_state["capturas_animais_list"] = []
         st.session_state["apreensoes_list"] = []
+        st.session_state["prolepse_list"] = []
         st.session_state["armamento_carregado"] = None
         st.session_state["cadg_list"] = [""]
         st.session_state["auto_infracao_list"] = [""]
@@ -670,7 +801,7 @@ with aba_policial:
     st.markdown("### 02 - CONTROLE DE VIATURAS / EMBARCAÇÕES")
     col3, col4, col5 = st.columns(3)
     with col3:
-        viatura = st.text_input("Prefixo da Viatura/Embarcação", placeholder="Ex: VTR-1234", key="viatura_prefixo")
+        viatura = st.selectbox("Prefixo da Viatura/Embarcação", VIATURAS_PLACAS, key="viatura_prefixo")
     with col4:
         km_inicial = st.number_input("Quilometragem (KM) Inicial", min_value=0, step=1, key="km_inicial_input")
     with col5:
@@ -681,6 +812,30 @@ with aba_policial:
             disabled=not encerrar_servico,
             help=None if encerrar_servico else "Só é exigido no dia de encerramento do serviço (marque a opção abaixo)."
         )
+
+    # --- TROCA DE ÓLEO: fixa por viatura, não por relatório ---
+    ultima_troca_km = buscar_troca_oleo(viatura)
+    col_oleo1, col_oleo2 = st.columns([4, 1])
+    with col_oleo1:
+        st.caption(f"🛢️ Última troca de óleo desta viatura: **{ultima_troca_km:.0f} km**")
+    with col_oleo2:
+        with st.popover("✏️ Editar Troca de Óleo", use_container_width=True):
+            st.caption("Atualize somente quando a troca de óleo desta viatura realmente acontecer.")
+            novo_km_troca = st.number_input("Novo KM da troca de óleo", min_value=0, step=1, value=int(ultima_troca_km), key=f"novo_km_troca_{viatura}")
+            if st.button("💾 Salvar", key=f"salvar_troca_{viatura}", use_container_width=True):
+                if salvar_troca_oleo(viatura, novo_km_troca):
+                    st.success("Troca de óleo atualizada!")
+                    st.rerun()
+                else:
+                    st.error("Falha ao salvar — sem conexão com o banco.")
+
+    km_desde_troca = km_inicial - ultima_troca_km
+    if 9500 <= km_desde_troca < 10000:
+        st.warning(f"🛢️ Faltam {10000 - km_desde_troca:.0f} km para a próxima troca de óleo desta viatura!")
+    elif km_desde_troca >= 10000:
+        st.error(f"🛢️ Troca de óleo atrasada! Já rodou {km_desde_troca:.0f} km desde a última troca.")
+
+    observacao_viatura = campo_texto_com_voz("Observação sobre a Viatura/Embarcação", "observacao_viatura_input", altura=70)
 
     encerrar_servico = st.checkbox(
         "🏁 Encerrar o serviço agora (habilita o KM Final e finaliza o relatório de 5 dias)",
@@ -888,6 +1043,84 @@ with aba_policial:
                         st.rerun()
     st.divider()
 
+    # Bloco Prolepse: Visitas a Fazendas
+    st.markdown("### PROLEPSE - VISITAS A FAZENDAS")
+    if st.session_state.get("carregar_edicao_prolepse") is not None:
+        _idx_edit = st.session_state.pop("carregar_edicao_prolepse")
+        _item_edit = st.session_state["prolepse_list"][_idx_edit]
+        st.session_state["editando_idx_prolepse"] = _idx_edit
+        st.session_state["fazenda_prolepse"] = _item_edit.get("FAZENDA", "")
+        st.session_state["municipio_prolepse"] = _item_edit.get("MUNICÍPIO", "Miranda")
+        st.session_state["nome_proprietario_prolepse"] = _item_edit.get("PROPRIETARIO", "")
+        st.session_state["contato_prolepse"] = _item_edit.get("CONTATO", "")
+        st.session_state["distancia_prolepse"] = _item_edit.get("DISTÂNCIA MIRANDA (KM)", 0.0)
+        st.session_state["coordenadas_prolepse"] = _item_edit.get("COORDENADAS", "")
+        st.session_state["observacao_prolepse_input"] = _item_edit.get("OBSERVAÇÃO", "")
+    with st.container(border=True):
+        col_pl1, col_pl2, col_pl3 = st.columns(3)
+        with col_pl1:
+            fazenda_prolepse = st.text_input("Fazenda Visitada", key="fazenda_prolepse")
+            contato_prolepse = st.text_input("Contato do Entrevistado/Fazenda", key="contato_prolepse")
+        with col_pl2:
+            municipio_prolepse = st.selectbox("Município", ["Miranda", "Bodoquena", "Anastácio", "Aquidauana", "Corumbá", "Outros"], key="municipio_prolepse")
+            distancia_prolepse = st.number_input("Distância de Miranda (KM)", min_value=0.0, step=1.0, key="distancia_prolepse")
+        with col_pl3:
+            nome_proprietario_prolepse = st.text_input("Nome do Proprietario", key="nome_proprietario_prolepse")
+            coordenadas_prolepse = st.text_input("Coordenadas", placeholder="Ex: -20.2417, -56.3789", key="coordenadas_prolepse")
+
+        observacao_prolepse = campo_texto_com_voz("Observação", "observacao_prolepse_input", altura=70)
+
+        editando_pl = st.session_state.get("editando_idx_prolepse")
+        label_pl = "💾 Salvar Edição da Fazenda" if editando_pl is not None else "➕ Inserir / Salvar Fazenda"
+        col_btn_pl1, col_btn_pl2 = st.columns([4, 1])
+        with col_btn_pl1:
+            clicou_salvar_pl = st.button(label_pl, use_container_width=True, key="botao_prolepse")
+        with col_btn_pl2:
+            if editando_pl is not None and st.button("✖️ Cancelar", use_container_width=True, key="cancelar_edicao_pl"):
+                st.session_state["editando_idx_prolepse"] = None
+                st.rerun()
+
+        if clicou_salvar_pl:
+            nova_visita_prolepse = {
+                "FAZENDA": fazenda_prolepse, "MUNICÍPIO": municipio_prolepse,
+                "ENTREVISTADO": nome_entrevistado_prolepse, "CONTATO": contato_prolepse,
+                "DISTÂNCIA MIRANDA (KM)": distancia_prolepse, "COORDENADAS": coordenadas_prolepse,
+                "OBSERVAÇÃO": observacao_prolepse
+            }
+            if editando_pl is not None:
+                st.session_state["prolepse_list"][editando_pl] = nova_visita_prolepse
+                st.session_state["editando_idx_prolepse"] = None
+            else:
+                st.session_state["prolepse_list"].append(nova_visita_prolepse)
+            _erro_auto = autosave_parcial()
+            if _erro_auto:
+                st.warning(f"Fazenda salva localmente, mas o salvamento automático falhou: {_erro_auto}")
+            else:
+                st.success("Visita à fazenda salva automaticamente na nuvem!")
+            st.rerun()
+
+    if st.session_state["prolepse_list"]:
+        st.markdown("###### Fazendas visitadas")
+        for i, item in enumerate(st.session_state["prolepse_list"]):
+            with st.container(border=True):
+                col_row1, col_row2, col_row3 = st.columns([6, 1, 1])
+                with col_row1:
+                    st.markdown(f"**{item.get('FAZENDA','')}** — {item.get('MUNICÍPIO','')} | Entrevistado: {item.get('ENTREVISTADO','')} | Contato: {item.get('CONTATO','') or '—'} | {item.get('DISTÂNCIA MIRANDA (KM)','')} km de Miranda")
+                    if item.get('COORDENADAS') or item.get('OBSERVAÇÃO'):
+                        st.caption(f"Coordenadas: {item.get('COORDENADAS','') or '—'} · Obs: {item.get('OBSERVAÇÃO','') or '—'}")
+                with col_row2:
+                    if st.button("✏️ Editar", key=f"edit_pl_{i}", use_container_width=True):
+                        st.session_state["carregar_edicao_prolepse"] = i
+                        st.rerun()
+                with col_row3:
+                    if st.button("🗑️ Excluir", key=f"del_pl_{i}", use_container_width=True):
+                        st.session_state["prolepse_list"].pop(i)
+                        if st.session_state.get("editando_idx_prolepse") == i:
+                            st.session_state["editando_idx_prolepse"] = None
+                        autosave_parcial()
+                        st.rerun()
+    st.divider()
+
     # Bloco 05: Patrulhamento Fluvial
     st.markdown("### 05 - PATRULHAMENTO FLUVIAL")
     if st.session_state.get("carregar_edicao_fluvial") is not None:
@@ -971,7 +1204,6 @@ with aba_policial:
                         autosave_parcial()
                         st.rerun()
     st.divider()
-
 
     # Bloco 06: Apreensões
     st.markdown("### 06 - APREENSÕES")
@@ -1199,6 +1431,97 @@ with aba_policial:
             "QTDE": st.column_config.NumberColumn("QTDE", min_value=0.0, format="%.2f")
         }
     )
+
+    observacao_armamento = campo_texto_com_voz("Observação sobre Armamento e Munição", "observacao_armamento_input", altura=70)
+
+    # ================= CAUTELA DE ARMAMENTO E MUNIÇÃO =================
+    st.markdown("####  Cautela de Armamento e Munição")
+    st.caption("A cautela fica em aberto (visível em todos os relatórios da unidade) até que o material seja devolvido.")
+
+    with st.popover(" Nova Cautela", use_container_width=True):
+        st.markdown("**1. Adicione os itens da cautela**")
+        col_cau1, col_cau2 = st.columns([2, 1])
+        with col_cau1:
+            codigo_cautela = st.text_input("Código do item", key="codigo_cautela_input")
+        with col_cau2:
+            qtd_cautela = st.number_input("Quantidade", min_value=1, step=1, key="qtd_cautela_input")
+
+        nome_item_cautela = CATALOGO_ARMAMENTO.get(codigo_cautela.strip()) if codigo_cautela else None
+        if codigo_cautela and not nome_item_cautela:
+            st.warning("Código não encontrado no catálogo.")
+        elif nome_item_cautela:
+            st.caption(f"📦 {nome_item_cautela}")
+
+        if st.button("➕ Adicionar Item à Cautela", use_container_width=True, disabled=not nome_item_cautela):
+            st.session_state["cautela_itens_temp"].append({
+                "CÓDIGO": codigo_cautela.strip(), "NOME": nome_item_cautela, "QUANTIDADE": qtd_cautela
+            })
+            st.rerun()
+
+        if st.session_state["cautela_itens_temp"]:
+            st.markdown("**Itens já adicionados:**")
+            for i, item_cau in enumerate(st.session_state["cautela_itens_temp"]):
+                col_ci1, col_ci2 = st.columns([5, 1])
+                with col_ci1:
+                    st.caption(f"{item_cau['CÓDIGO']} — {item_cau['NOME']} (Qtd: {item_cau['QUANTIDADE']})")
+                with col_ci2:
+                    if st.button("🗑️", key=f"del_cautela_temp_{i}"):
+                        st.session_state["cautela_itens_temp"].pop(i)
+                        st.rerun()
+
+            st.divider()
+            st.markdown("**2. Dados da cautela**")
+            destinatario_cautela = st.text_input("Para quem está cautelando", key="destinatario_cautela_input")
+            col_cau3, col_cau4 = st.columns(2)
+            with col_cau3:
+                data_cautela_val = st.date_input("Data da Cautela", value=datetime.now(), key="data_cautela_input")
+            with col_cau4:
+                prazo_indefinido = st.checkbox("Prazo indefinido", key="prazo_indefinido_cautela")
+                prazo_cautela_val = st.date_input("Prazo para devolução", value=datetime.now(), key="prazo_cautela_input", disabled=prazo_indefinido)
+
+            if st.button("✅ Finalizar Cautela", type="primary", use_container_width=True):
+                if not destinatario_cautela:
+                    st.error("Informe para quem está cautelando.")
+                else:
+                    novo_id_cautela, erro_cautela = criar_cautela(
+                        st.session_state["unidade_operacional"], destinatario_cautela, data_cautela_val,
+                        None if prazo_indefinido else prazo_cautela_val, prazo_indefinido,
+                        st.session_state["cautela_itens_temp"]
+                    )
+                    if erro_cautela:
+                        st.error(f"Falha ao salvar a cautela: {erro_cautela}")
+                    else:
+                        st.session_state["cautela_itens_temp"] = []
+                        st.success(f"✅ Cautela Nº {novo_id_cautela:04d} finalizada!")
+                        st.rerun()
+
+    # --- CAUTELAS EM ABERTO DESTA UNIDADE ---
+    cautelas_abertas = listar_cautelas_abertas(st.session_state["unidade_operacional"])
+    if cautelas_abertas:
+        st.markdown("##### 📋 Cautelas em Aberto")
+        for cautela in cautelas_abertas:
+            try:
+                itens_cautela = json.loads(cautela.get("itens") or "[]")
+            except Exception:
+                itens_cautela = []
+            with st.container(border=True):
+                prazo_txt = "Indefinido" if cautela.get("prazo_indefinido") else str(cautela.get("prazo") or "—")
+                st.markdown(f"**Cautela Nº {cautela['id']:04d}** — Para: {cautela.get('destinatario','')} | Data: {cautela.get('data_cautela','')} | Prazo: {prazo_txt}")
+                for item_cau in itens_cautela:
+                    st.caption(f"• {item_cau.get('CÓDIGO','')} — {item_cau.get('NOME','')} (Qtd: {item_cau.get('QUANTIDADE','')})")
+
+                with st.popover("📦 Entrega de Materiais", use_container_width=True):
+                    st.caption("Confirme a devolução do material desta cautela.")
+                    obs_entrega = st.text_area("Observação (opcional)", key=f"obs_entrega_{cautela['id']}")
+                    if st.button("✅ Confirmar Entrega", key=f"confirmar_entrega_{cautela['id']}", use_container_width=True):
+                        if entregar_cautela(cautela["id"], obs_entrega):
+                            st.success("Material entregue! Cautela encerrada.")
+                            st.rerun()
+                        else:
+                            st.error("Falha ao registrar a entrega — sem conexão com o banco.")
+
+        st.caption("💡 Para imprimir uma cautela, use o botão \"IMPRIMIR / SALVAR ABA EM PDF\" no final da página.")
+
     st.divider()
 
     # Bloco 09: Alterações de Serviço (Antigo Bloco 06)
@@ -1233,10 +1556,12 @@ with aba_policial:
                 "data_inicial": data_ini_sel,
                 "data_final": data_fim_sel,
                 "viatura_prefixo": viatura,
+                "observacao_viatura": observacao_viatura,
                 "km_inicial": km_inicial,
                 "km_final": km_final if encerrar_servico else None,
                 "capturas_animais": json.dumps(st.session_state["capturas_animais_list"], ensure_ascii=False),
                 "apreensoes": json.dumps(st.session_state["apreensoes_list"], ensure_ascii=False),
+                "visitas_prolepse": json.dumps(st.session_state["prolepse_list"], ensure_ascii=False),
                 "pessoas_abordadas": sum(item["PESSOAS ABORDADAS"] for item in st.session_state["patrulhamento_terrestre_list"]),
                 "veiculos_abordados": sum(item.get("VEÍCULOS ABORDADOS", 0) for item in st.session_state["patrulhamento_terrestre_list"]),
                 "embarcacoes_abordadas": sum(item["EMBARCAÇÕES ABORDADAS"] for item in st.session_state["patrulhamento_fluvial_list"]),
@@ -1265,6 +1590,7 @@ with aba_policial:
                     st.session_state["patrulhamento_fluvial_list"] = []
                     st.session_state["capturas_animais_list"] = []
                     st.session_state["apreensoes_list"] = []
+                    st.session_state["prolepse_list"] = []
                     st.session_state["armamento_carregado"] = None
                 else:
                     st.success(f"💾 Progresso do dia salvo na nuvem (Nº {novo_id:04d}). Serviço continua em andamento — pode fechar o sistema com segurança e retomar depois.")
@@ -1360,7 +1686,10 @@ with aba_adm:
                     
                     # Renomeia o ID para Sequência Numérica Oficial
                     df = df.rename(columns={"id": "Nº Sequencial do Relatório"})
-                    
+
+                    # Cópia sem filtro de período — usada só pela Busca Avançada por ano abaixo
+                    df_completo_todos_anos = df.copy()
+
                     # Filtros de tempo (Semana, Mês, Ano)
                     st.markdown("### 📅 Filtro Temporal de Produção")
                     periodo = st.radio("Selecione o período de análise:", ["Total Histórico", "Últimos 7 Dias (Semana)", "Último Mês", "Ano Atual"], horizontal=True)
@@ -1406,6 +1735,85 @@ with aba_adm:
                         df_graf_apreensoes = df_graf_apreensoes[df_graf_apreensoes["INFRAÇÃO/CRIME"] != "Não se aplica"]
                     total_apreensoes = len(df_graf_apreensoes) if not df_graf_apreensoes.empty else 0
                     total_multas = pd.to_numeric(df_graf_apreensoes["VALOR MULTA"], errors='coerce').fillna(0).sum() if not df_graf_apreensoes.empty and "VALOR MULTA" in df_graf_apreensoes.columns else 0.0
+
+                    # --- BUSCA AVANÇADA: as duas unidades juntas, com seletor de ano ---
+                    st.divider()
+                    with st.expander("🔎 Busca Avançada (todas as unidades, por ano de referência)"):
+                        anos_com_dados = []
+                        if not df_completo_todos_anos.empty:
+                            anos_com_dados = pd.to_datetime(df_completo_todos_anos['data_filtro']).dt.year.dropna().unique().tolist()
+                        ano_atual = datetime.now().year
+                        anos_disponiveis = sorted(set([int(a) for a in anos_com_dados] + [ano_atual, ano_atual + 1]), reverse=True)
+
+                        with st.form("form_busca_avancada"):
+                            col_busca1, col_busca2 = st.columns([1, 3])
+                            with col_busca1:
+                                ano_busca = st.selectbox(
+                                    "Ano de referência", anos_disponiveis, key="ano_busca_avancada",
+                                    index=anos_disponiveis.index(ano_atual) if ano_atual in anos_disponiveis else 0
+                                )
+                            with col_busca2:
+                                termo_busca_avancada = st.text_input(
+                                    "Buscar (ex: nome de uma espécie de animal, Nº do relatório, comandante, tipo de material...)",
+                                    key="termo_busca_avancada"
+                                )
+                            buscar_clicado = st.form_submit_button("🔎 Buscar")
+
+                        if buscar_clicado:
+                            st.session_state["ultima_busca_avancada"] = {"ano": ano_busca, "termo": termo_busca_avancada}
+
+                        busca_ativa = st.session_state.get("ultima_busca_avancada")
+
+                        if busca_ativa and busca_ativa["termo"]:
+                            ano_busca_ativa = busca_ativa["ano"]
+                            termo_busca_avancada = busca_ativa["termo"]
+                            df_ano_busca = df_completo_todos_anos[pd.to_datetime(df_completo_todos_anos['data_filtro']).dt.year == ano_busca_ativa]
+                            termo_lower = termo_busca_avancada.lower()
+
+                            df_animais_ano = explodir_lista_json(df_ano_busca, "capturas_animais")
+                            if not df_animais_ano.empty and "ESPÉCIE" in df_animais_ano.columns:
+                                resultado_animais = df_animais_ano[df_animais_ano["ESPÉCIE"].astype(str).str.lower().str.contains(termo_lower, na=False)]
+                            else:
+                                resultado_animais = pd.DataFrame()
+
+                            df_apreensoes_ano = explodir_lista_json(df_ano_busca, "apreensoes")
+                            if not df_apreensoes_ano.empty:
+                                mask_apreensao = pd.Series(False, index=df_apreensoes_ano.index)
+                                for col in ["INFRAÇÃO/CRIME", "TIPO MATERIAL", "DESCRIÇÃO"]:
+                                    if col in df_apreensoes_ano.columns:
+                                        mask_apreensao |= df_apreensoes_ano[col].astype(str).str.lower().str.contains(termo_lower, na=False)
+                                resultado_apreensoes = df_apreensoes_ano[mask_apreensao]
+                            else:
+                                resultado_apreensoes = pd.DataFrame()
+
+                            mask_relatorio = pd.Series(False, index=df_ano_busca.index)
+                            for col in ["Nº Sequencial do Relatório", "comandante", "unidade"]:
+                                if col in df_ano_busca.columns:
+                                    mask_relatorio |= df_ano_busca[col].astype(str).str.lower().str.contains(termo_lower, na=False)
+                            resultado_relatorios = df_ano_busca[mask_relatorio]
+
+                            achou_algo = False
+                            if not resultado_animais.empty:
+                                achou_algo = True
+                                qtd_total_animais = pd.to_numeric(resultado_animais["QUANTIDADE"], errors='coerce').fillna(0).sum() if "QUANTIDADE" in resultado_animais.columns else len(resultado_animais)
+                                st.success(f"🐾 **{qtd_total_animais:.0f}** capturado(s) envolvendo \"{termo_busca_avancada}\" em {ano_busca_ativa} ({len(resultado_animais)} ocorrência(s))")
+                                st.dataframe(resultado_animais, use_container_width=True)
+
+                            if not resultado_apreensoes.empty:
+                                achou_algo = True
+                                st.info(f"📦 **{len(resultado_apreensoes)}** apreensão(ões) relacionada(s) a \"{termo_busca_avancada}\" em {ano_busca_ativa}")
+                                st.dataframe(resultado_apreensoes, use_container_width=True)
+
+                            if not resultado_relatorios.empty:
+                                achou_algo = True
+                                st.info(f"📋 **{len(resultado_relatorios)}** relatório(s) encontrados por Nº/comandante/unidade")
+                                cols_rel = [c for c in ["Nº Sequencial do Relatório", "unidade", "comandante", "status", "data_filtro"] if c in resultado_relatorios.columns]
+                                st.dataframe(resultado_relatorios[cols_rel], use_container_width=True)
+
+                            if not achou_algo:
+                                st.warning("Nenhum resultado encontrado para esse termo nesse ano.")
+                        else:
+                            st.caption("Escolha o ano, digite um termo de busca e clique em \"🔎 Buscar\".")
 
                     # Abas do Dashboard Administrativo
                     tab_geral, tab_unidades, tab_equipes = st.tabs(["📊 Produção Geral", "🏢 Por Unidade", "🪖 Por Equipes (Efetivo)"])
