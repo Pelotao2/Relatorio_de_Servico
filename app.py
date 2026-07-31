@@ -9,7 +9,19 @@ import time
 import json
 import re
 import difflib
+import base64
+import io
 from datetime import datetime, timedelta
+from docx import Document
+from docx.shared import Pt, Cm
+
+def exibir_logo(caminho, width):
+    """Mostra uma imagem de logo sem derrubar o app se o arquivo não existir
+    no ambiente (ex.: esquecido de subir pro GitHub na nuvem)."""
+    try:
+        st.image(caminho, width=width)
+    except Exception:
+        st.caption("🌿 (logo não encontrado neste ambiente)")
 
 # --- SISTEMA DE AUTENTICAÇÃO ---
 # Dicionário de usuários cadastrados (Altere/adicione os logins e senhas desejados aqui)
@@ -42,7 +54,7 @@ def realizar_login(usuario, senha):
 if st.session_state["unidade_operacional"] is None:
     col_logo_login, col_vazio_login = st.columns([1, 3])
     with col_logo_login:
-        st.image("logo_pantanal_folhas.png", width=180)
+        exibir_logo("logo_pantanal_folhas.png", 180)
     st.title(" Sistema de Controle de Produtividade")
     st.subheader("Selecione sua unidade para continuar")
     col_un_a, col_un_b = st.columns(2)
@@ -236,6 +248,105 @@ def entregar_cautela(cautela_id, observacao):
     except Exception:
         return False
 
+# --- Designação oficial da unidade, usada no número do Relatório de Fiscalização ---
+# Nº <sequencial>/<designação>/<ano>. Ajuste se a GPM Barra usar uma designação diferente.
+DESIGNACAO_UNIDADE_FISCALIZACAO = {
+    "2º Pel Miranda": "2ºPEL/2ªCIA/1ºBPMA/CPAMB",
+    "GPM Barra": "2ºPEL/2ªCIA/1ºBPMA/CPAMB"
+}
+
+def proximo_numero_fiscalizacao(unidade, ano):
+    """Calcula o próximo número sequencial do Relatório de Fiscalização, por
+    unidade e por ano (reinicia a cada ano, como no modelo oficial)."""
+    conn = init_connection()
+    if not conn:
+        return 1
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COALESCE(MAX(sequencial), 0) + 1 AS proximo FROM relatorios_fiscalizacao WHERE unidade = %s AND ano = %s;",
+            (unidade, ano)
+        )
+        return cur.fetchone()["proximo"]
+    except Exception:
+        return 1
+    finally:
+        conn.close()
+
+def salvar_relatorio_fiscalizacao(dados: dict, id_existente=None, usuario_atual=""):
+    """Cria ou atualiza um Relatório de Fiscalização Ambiental. Em edições,
+    registra quem alterou e quando (auditoria)."""
+    conn = init_connection()
+    if not conn:
+        return None, "Sem conexão com o banco de dados."
+    try:
+        cur = conn.cursor()
+        if id_existente:
+            dados = dict(dados)
+            dados["editado_por"] = usuario_atual
+            dados["data_edicao"] = datetime.now()
+            campos_imutaveis = {"numero", "sequencial", "ano", "unidade", "criado_por"}
+            dados = {k: v for k, v in dados.items() if k not in campos_imutaveis}
+            sets = ", ".join(f"{col} = %s" for col in dados.keys())
+            valores = list(dados.values()) + [id_existente]
+            cur.execute(f"UPDATE relatorios_fiscalizacao SET {sets} WHERE id = %s;", valores)
+            novo_id = id_existente
+        else:
+            dados = dict(dados)
+            dados["criado_por"] = usuario_atual
+            colunas = ", ".join(dados.keys())
+            placeholders = ", ".join(["%s"] * len(dados))
+            cur.execute(f"INSERT INTO relatorios_fiscalizacao ({colunas}) VALUES ({placeholders}) RETURNING id;", list(dados.values()))
+            novo_id = cur.fetchone()["id"]
+        conn.commit()
+        cur.close()
+        conn.close()
+        return novo_id, None
+    except Exception as e:
+        conn.close()
+        return None, str(e)
+
+def buscar_relatorios_fiscalizacao(termo, unidade=None):
+    """Busca Relatórios de Fiscalização por número ou nome do autuado.
+    Se `unidade` for None, busca nas duas unidades (uso do Painel Admin)."""
+    conn = init_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        termo_like = f"%{termo}%"
+        if unidade:
+            cur.execute(
+                "SELECT * FROM relatorios_fiscalizacao WHERE unidade = %s AND (numero ILIKE %s OR nome_autuado ILIKE %s) ORDER BY id DESC LIMIT 30;",
+                (unidade, termo_like, termo_like)
+            )
+        else:
+            cur.execute(
+                "SELECT * FROM relatorios_fiscalizacao WHERE numero ILIKE %s OR nome_autuado ILIKE %s ORDER BY id DESC LIMIT 30;",
+                (termo_like, termo_like)
+            )
+        registros = cur.fetchall()
+        cur.close()
+        conn.close()
+        return registros
+    except Exception:
+        return []
+
+def excluir_relatorio_fiscalizacao(id_relatorio):
+    """Exclui definitivamente um Relatório de Fiscalização — uso restrito ao Admin."""
+    conn = init_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM relatorios_fiscalizacao WHERE id = %s;", (id_relatorio,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
 def buscar_relatorio_em_andamento(unidade, comandante):
     """Procura, para a guarnição informada, um relatório com status 'Em Andamento'.
     Usado para retomar automaticamente o serviço do dia anterior."""
@@ -254,6 +365,193 @@ def buscar_relatorio_em_andamento(unidade, comandante):
         return registro
     except Exception:
         return None
+
+def _docx_shading(cell, cor_hex):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), cor_hex)
+    cell._tc.get_or_add_tcPr().append(shd)
+
+def _docx_secao_titulo(doc, texto):
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    tabela = doc.add_table(rows=1, cols=1)
+    tabela.style = "Table Grid"
+    celula = tabela.rows[0].cells[0]
+    _docx_shading(celula, "00D25F")
+    p = celula.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run(texto)
+    run.bold = True
+    run.font.size = Pt(14)
+
+def _docx_campo(doc, campos):
+    """campos: lista de tuplas (numero_ou_None, rotulo, valor), lado a lado na mesma linha."""
+    tabela = doc.add_table(rows=2, cols=len(campos))
+    tabela.style = "Table Grid"
+    for idx, (numero, rotulo, valor) in enumerate(campos):
+        texto_rotulo = f"{numero}   {rotulo}" if numero else rotulo
+        celula_label = tabela.rows[0].cells[idx]
+        _docx_shading(celula_label, "D7E3BC")
+        p_label = celula_label.paragraphs[0]
+        run_label = p_label.add_run(texto_rotulo)
+        run_label.bold = True
+        run_label.font.size = Pt(9)
+        p_val = tabela.rows[1].cells[idx].paragraphs[0]
+        run_val = p_val.add_run(str(valor or ""))
+        run_val.font.size = Pt(10)
+
+def _docx_add_page_number_field(paragraph):
+    """Insere o campo dinâmico de número de página (equivalente a PAGE do Word)."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    run = paragraph.add_run()
+    fld1 = OxmlElement('w:fldChar'); fld1.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText'); instr.set(qn('xml:space'), 'preserve'); instr.text = "PAGE"
+    fld2 = OxmlElement('w:fldChar'); fld2.set(qn('w:fldCharType'), 'end')
+    run._r.append(fld1); run._r.append(instr); run._r.append(fld2)
+
+def _docx_add_numpages_field(paragraph):
+    """Insere o campo dinâmico de total de páginas (equivalente a NUMPAGES do Word)."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    run = paragraph.add_run()
+    fld1 = OxmlElement('w:fldChar'); fld1.set(qn('w:fldCharType'), 'begin')
+    instr = OxmlElement('w:instrText'); instr.set(qn('xml:space'), 'preserve'); instr.text = "NUMPAGES"
+    fld2 = OxmlElement('w:fldChar'); fld2.set(qn('w:fldCharType'), 'end')
+    run._r.append(fld1); run._r.append(instr); run._r.append(fld2)
+
+# Texto do cabeçalho oficial por unidade — confirme/ajuste a designação da GPM Barra.
+DESIGNACAO_CABECALHO_FISCALIZACAO = {
+    "2º Pel Miranda": "2º PELOTÃO DE PM AMBIENTAL/2°CPMA/1°BPMA/CPAMB/MIRANDA",
+    "GPM Barra": "2º PELOTÃO DE PM AMBIENTAL/2°CPMA/1°BPMA/CPAMB/BARRA"
+}
+RODAPE_INSTITUCIONAL_FISCALIZACAO = (
+    "Rua Lima Félix nº 175 – Jd. Veraneio – Pq. das Nações Indígenas - Cep 79037-109, "
+    "Campo Grande–MS Fones: (67) 3357-1500 - e-mail: pmams_p1@hotmail.com"
+)
+
+def gerar_docx_fiscalizacao(dados):
+    """Gera o documento .docx do Relatório de Fiscalização Ambiental, fiel ao
+    modelo oficial (cabeçalho com logo e designação, formulários numerados,
+    fatos, fotos, multa, providências, assinatura e rodapé institucional)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    doc = Document()
+    for secao in doc.sections:
+        secao.left_margin = Cm(2)
+        secao.right_margin = Cm(2)
+
+        header = secao.header
+        p_logo = header.paragraphs[0]
+        p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        try:
+            p_logo.add_run().add_picture("logo_pma_oficial.png", width=Cm(9))
+        except Exception:
+            pass
+        p_designacao = header.add_paragraph()
+        p_designacao.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        designacao_cab = DESIGNACAO_CABECALHO_FISCALIZACAO.get(dados.get("unidade", ""), "")
+        r_desig = p_designacao.add_run(designacao_cab)
+        r_desig.bold = True
+        r_desig.font.size = Pt(11)
+
+        footer = secao.footer
+        p_end = footer.paragraphs[0]
+        p_end.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r_end = p_end.add_run(RODAPE_INSTITUCIONAL_FISCALIZACAO)
+        r_end.font.size = Pt(8)
+        p_pag = footer.add_paragraph()
+        p_pag.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r_pag1 = p_pag.add_run("Página "); r_pag1.font.size = Pt(8)
+        _docx_add_page_number_field(p_pag)
+        r_pag2 = p_pag.add_run(" de "); r_pag2.font.size = Pt(8)
+        _docx_add_numpages_field(p_pag)
+
+    titulo = doc.add_paragraph()
+    titulo.alignment = 1
+    r = titulo.add_run("RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL")
+    r.bold = True
+    r.font.size = Pt(13)
+
+    numero_par = doc.add_paragraph()
+    numero_par.alignment = 1
+    r2 = numero_par.add_run(f"Nº {dados.get('numero','')}")
+    r2.bold = True
+
+    p_int = doc.add_paragraph()
+    p_int.add_run("Interessado: ").bold = True
+    p_int.add_run(dados.get("interessado", ""))
+
+    _docx_secao_titulo(doc, "DO AUTUADO/FISCALIZADO")
+    _docx_campo(doc, [("01", "Nome/Nome Empresarial", dados.get("nome_autuado", ""))])
+    _docx_campo(doc, [("02", "CPF/CNPJ", dados.get("cpf_cnpj", "")), ("03", "RG/Insc. Estadual", dados.get("rg_ie", ""))])
+    _docx_campo(doc, [("04", "Endereço Completo", dados.get("endereco", ""))])
+
+    _docx_secao_titulo(doc, "DA INFRAÇÃO/FISCALIZAÇÃO")
+    _docx_campo(doc, [("05", "Local", dados.get("local_fiscalizacao", "")), ("06", "Data", dados.get("data_fiscalizacao", ""))])
+    _docx_campo(doc, [
+        ("07", "Coord. Geográfica", dados.get("coordenadas", "")),
+        ("08", "Município", dados.get("municipio", "")),
+        ("09", "Telefone", dados.get("telefone", ""))
+    ])
+
+    _docx_secao_titulo(doc, "LEGISLAÇÃO APLICÁVEL")
+    _docx_campo(doc, [("10", "Legislação", dados.get("legislacao", ""))])
+
+    _docx_secao_titulo(doc, "FORMULÁRIOS IMASUL")
+    _docx_campo(doc, [("", "Auto de Infração nº:", dados.get("auto_infracao_nr", "")), ("", "Laudo de Constatação nº:", dados.get("laudo_constatacao_nr", ""))])
+    _docx_campo(doc, [("", "Termo de Paralisação nº:", dados.get("termo_paralisacao_nr", "")), ("", "Notificação nº:", dados.get("notificacao_nr", ""))])
+    _docx_campo(doc, [("", "Folhas Complementares (quantidade):", dados.get("folhas_complementares", "")), ("", "BO CADG nº:", dados.get("bo_cadg_nr", ""))])
+
+    doc.add_paragraph()
+    p1 = doc.add_paragraph()
+    p1.add_run("1. DOS FATOS").bold = True
+    p2 = doc.add_paragraph()
+    p2.add_run("1. HISTÓRICO").bold = True
+    doc.add_paragraph(dados.get("fatos_historico", ""))
+
+    try:
+        fotos = json.loads(dados.get("fotos") or "[]")
+    except Exception:
+        fotos = []
+    for foto in fotos:
+        try:
+            img_bytes = base64.b64decode(foto["dados_base64"])
+            doc.add_picture(io.BytesIO(img_bytes), width=Cm(9))
+            legenda = doc.add_paragraph(foto.get("legenda", ""))
+            legenda.alignment = 1
+        except Exception:
+            pass
+
+    p3 = doc.add_paragraph()
+    p3.add_run("2. DO VALOR DA MULTA:").bold = True
+    doc.add_paragraph(dados.get("valor_multa_texto", ""))
+
+    p4 = doc.add_paragraph()
+    p4.add_run("3. DAS PROVIDÊNCIAS ADMINISTRATIVAS").bold = True
+    doc.add_paragraph(dados.get("providencias", ""))
+
+    doc.add_paragraph()
+    p_local = doc.add_paragraph()
+    p_local.alignment = 1
+    p_local.add_run(f"{dados.get('municipio_assinatura','Miranda (MS)')}, {dados.get('data_assinatura','')}.")
+
+    p_ass1 = doc.add_paragraph()
+    p_ass1.alignment = 1
+    p_ass1.add_run(dados.get("relator", "")).bold = True
+    p_ass2 = doc.add_paragraph()
+    p_ass2.alignment = 1
+    p_ass2.add_run(dados.get("cargo_relator", "Cmt. da GU Ambiental/Relator"))
+    p_ass3 = doc.add_paragraph()
+    p_ass3.alignment = 1
+    p_ass3.add_run(f"Mat. {dados.get('matricula_relator','')}")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 def listar_relatorios_em_andamento(unidade):
     """Lista todos os relatórios 'Em Andamento' de uma unidade — usado no painel
@@ -625,7 +923,7 @@ def campo_multiplo(label, session_key, placeholder_prefix=None):
     return [v.strip() for v in st.session_state[session_key] if v.strip() != ""]
 
 # Criando as abas principais na interface do usuário
-aba_policial, aba_adm = st.tabs(["Formulário de Serviço", "Painel Estratégico (Adm)"])
+aba_policial, aba_fiscalizacao, aba_adm = st.tabs(["Formulário de Serviço", "📋 Relatório de Fiscalização", "Painel Estratégico (Adm)"])
 
 # ------------------------------------------
 # VISÃO 1: FORMULÁRIO DE SERVIÇO (POLICIAL)
@@ -636,7 +934,7 @@ with aba_policial:
     with col_tit1:
         col_logo, col_texto_tit = st.columns([1, 6])
         with col_logo:
-            st.image("logo_pantanal_folhas.png", width=70)
+            exibir_logo("logo_pantanal_folhas.png", 70)
         with col_texto_tit:
             st.markdown("# RELATÓRIO DE SERVIÇO DIÁRIO OFICIAL")
             st.caption(f"Unidade: **{st.session_state['unidade_operacional']}** — Preencha os campos operacionais da guarnição abaixo.")
@@ -1083,7 +1381,7 @@ with aba_policial:
         if clicou_salvar_pl:
             nova_visita_prolepse = {
                 "FAZENDA": fazenda_prolepse, "MUNICÍPIO": municipio_prolepse,
-                "ENTREVISTADO": nome_entrevistado_prolepse, "CONTATO": contato_prolepse,
+                "PROPRIETARIO": nome_proprietario_prolepse, "CONTATO": contato_prolepse,
                 "DISTÂNCIA MIRANDA (KM)": distancia_prolepse, "COORDENADAS": coordenadas_prolepse,
                 "OBSERVAÇÃO": observacao_prolepse
             }
@@ -1105,7 +1403,7 @@ with aba_policial:
             with st.container(border=True):
                 col_row1, col_row2, col_row3 = st.columns([6, 1, 1])
                 with col_row1:
-                    st.markdown(f"**{item.get('FAZENDA','')}** — {item.get('MUNICÍPIO','')} | Entrevistado: {item.get('ENTREVISTADO','')} | Contato: {item.get('CONTATO','') or '—'} | {item.get('DISTÂNCIA MIRANDA (KM)','')} km de Miranda")
+                    st.markdown(f"**{item.get('FAZENDA','')}** — {item.get('MUNICÍPIO','')} | Proprietário: {item.get('PROPRIETARIO','')} | Contato: {item.get('CONTATO','') or '—'} | {item.get('DISTÂNCIA MIRANDA (KM)','')} km de Miranda")
                     if item.get('COORDENADAS') or item.get('OBSERVAÇÃO'):
                         st.caption(f"Coordenadas: {item.get('COORDENADAS','') or '—'} · Obs: {item.get('OBSERVAÇÃO','') or '—'}")
                 with col_row2:
@@ -1627,6 +1925,227 @@ with aba_policial:
 # ------------------------------------------
 # VISÃO 2: PAINEL ESTRATÉGICO ADMINISTRATIVO (COMPLETO)
 # ------------------------------------------
+# ------------------------------------------
+# VISÃO 3: RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL
+# ------------------------------------------
+with aba_fiscalizacao:
+    st.markdown("# 📋 RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL")
+    st.caption(f"Unidade: **{st.session_state['unidade_operacional']}**")
+
+    if "rf_fotos_list" not in st.session_state:
+        st.session_state["rf_fotos_list"] = []
+    if "rf_id_atual" not in st.session_state:
+        st.session_state["rf_id_atual"] = None
+    if "rf_numero_atual" not in st.session_state:
+        st.session_state["rf_numero_atual"] = None
+
+    # --- Carrega um relatório encontrado na busca (antes dos widgets) ---
+    if st.session_state.get("carregar_edicao_rf") is not None:
+        _reg = st.session_state.pop("carregar_edicao_rf")
+        st.session_state["rf_id_atual"] = _reg["id"]
+        st.session_state["rf_numero_atual"] = _reg.get("numero")
+        st.session_state["rf_interessado"] = _reg.get("interessado", "")
+        st.session_state["rf_nome_autuado"] = _reg.get("nome_autuado", "")
+        st.session_state["rf_cpf_cnpj"] = _reg.get("cpf_cnpj", "")
+        st.session_state["rf_rg_ie"] = _reg.get("rg_ie", "")
+        st.session_state["rf_endereco"] = _reg.get("endereco", "")
+        st.session_state["rf_local"] = _reg.get("local_fiscalizacao", "")
+        if _reg.get("data_fiscalizacao"):
+            st.session_state["rf_data_fiscalizacao"] = _reg.get("data_fiscalizacao")
+        st.session_state["rf_coordenadas"] = _reg.get("coordenadas", "")
+        st.session_state["rf_municipio"] = _reg.get("municipio", "Miranda")
+        st.session_state["rf_telefone"] = _reg.get("telefone", "")
+        st.session_state["rf_legislacao"] = _reg.get("legislacao", "")
+        st.session_state["rf_auto_infracao_nr"] = _reg.get("auto_infracao_nr", "")
+        st.session_state["rf_laudo_constatacao_nr"] = _reg.get("laudo_constatacao_nr", "")
+        st.session_state["rf_termo_paralisacao_nr"] = _reg.get("termo_paralisacao_nr", "")
+        st.session_state["rf_notificacao_nr"] = _reg.get("notificacao_nr", "")
+        st.session_state["rf_folhas_complementares"] = _reg.get("folhas_complementares", 0) or 0
+        st.session_state["rf_bo_cadg_nr"] = _reg.get("bo_cadg_nr", "")
+        st.session_state["rf_fatos_historico"] = _reg.get("fatos_historico", "")
+        st.session_state["rf_valor_multa_texto"] = _reg.get("valor_multa_texto", "")
+        st.session_state["rf_providencias"] = _reg.get("providencias", "")
+        st.session_state["rf_municipio_assinatura"] = _reg.get("municipio_assinatura", "Miranda (MS)")
+        if _reg.get("data_assinatura"):
+            st.session_state["rf_data_assinatura"] = _reg.get("data_assinatura")
+        st.session_state["rf_relator"] = _reg.get("relator", "")
+        st.session_state["rf_cargo_relator"] = _reg.get("cargo_relator", "Cmt. da GU Ambiental/Relator")
+        try:
+            st.session_state["rf_fotos_list"] = json.loads(_reg.get("fotos") or "[]")
+        except Exception:
+            st.session_state["rf_fotos_list"] = []
+
+    # --- Busca dentro da própria aba (só nesta unidade) ---
+    with st.expander("🔎 Buscar Relatório de Fiscalização (nesta unidade)"):
+        with st.form("form_busca_rf"):
+            termo_rf = st.text_input("Buscar por número ou nome do autuado", key="termo_busca_rf")
+            buscar_rf_clicado = st.form_submit_button("🔎 Buscar")
+        if buscar_rf_clicado and termo_rf:
+            resultados_rf = buscar_relatorios_fiscalizacao(termo_rf, unidade=st.session_state["unidade_operacional"])
+            if resultados_rf:
+                for reg in resultados_rf:
+                    col_r1, col_r2 = st.columns([5, 1])
+                    with col_r1:
+                        st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')})")
+                    with col_r2:
+                        if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
+                            st.session_state["carregar_edicao_rf"] = reg
+                            st.rerun()
+            else:
+                st.info("Nenhum relatório encontrado.")
+
+    st.divider()
+
+    if st.session_state["rf_id_atual"]:
+        col_novo1, col_novo2 = st.columns([4, 1])
+        with col_novo1:
+            st.info(f"✏️ Editando o relatório **Nº {st.session_state['rf_numero_atual']}**")
+        with col_novo2:
+            if st.button("➕ Novo Relatório", use_container_width=True, key="novo_rf_btn"):
+                for k in [k for k in st.session_state.keys() if k.startswith("rf_")]:
+                    del st.session_state[k]
+                st.session_state["rf_fotos_list"] = []
+                st.session_state["rf_id_atual"] = None
+                st.session_state["rf_numero_atual"] = None
+                st.rerun()
+
+    interessado_rf = st.text_input("Interessado", value=st.session_state.get("rf_interessado", "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)"), key="rf_interessado")
+
+    st.markdown("#### DO AUTUADO/FISCALIZADO")
+    nome_autuado_rf = st.text_input("01 - Nome/Nome Empresarial", key="rf_nome_autuado")
+    col_rf1, col_rf2 = st.columns(2)
+    with col_rf1:
+        cpf_cnpj_rf = st.text_input("02 - CPF/CNPJ", key="rf_cpf_cnpj")
+    with col_rf2:
+        rg_ie_rf = st.text_input("03 - RG/Insc. Estadual", key="rf_rg_ie")
+    endereco_rf = st.text_area("04 - Endereço Completo", key="rf_endereco", height=70)
+
+    st.markdown("#### DA INFRAÇÃO/FISCALIZAÇÃO")
+    col_rf3, col_rf4 = st.columns(2)
+    with col_rf3:
+        local_rf = st.text_area("05 - Local", key="rf_local", height=70)
+    with col_rf4:
+        data_fiscalizacao_rf = st.date_input("06 - Data", value=datetime.now(), key="rf_data_fiscalizacao")
+    col_rf5, col_rf6, col_rf7 = st.columns(3)
+    with col_rf5:
+        coordenadas_rf = st.text_input("07 - Coord. Geográfica", key="rf_coordenadas")
+    with col_rf6:
+        municipio_rf = st.selectbox("08 - Município", ["Miranda", "Bodoquena", "Anastácio", "Aquidauana", "Corumbá", "Bonito", "Jardim", "Outros"], key="rf_municipio")
+    with col_rf7:
+        telefone_rf = st.text_input("09 - Telefone", key="rf_telefone")
+
+    st.markdown("#### LEGISLAÇÃO APLICÁVEL")
+    legislacao_rf = campo_texto_com_voz("10 - Legislação (um artigo por linha)", "rf_legislacao", altura=100)
+
+    st.markdown("#### FORMULÁRIOS IMASUL")
+    col_rf8, col_rf9 = st.columns(2)
+    with col_rf8:
+        auto_infracao_nr_rf = st.text_input("Auto de Infração nº", key="rf_auto_infracao_nr")
+    with col_rf9:
+        laudo_constatacao_nr_rf = st.text_input("Laudo de Constatação nº", key="rf_laudo_constatacao_nr")
+    col_rf10, col_rf11 = st.columns(2)
+    with col_rf10:
+        termo_paralisacao_nr_rf = st.text_input("Termo de Paralisação nº", key="rf_termo_paralisacao_nr")
+    with col_rf11:
+        notificacao_nr_rf = st.text_input("Notificação nº", key="rf_notificacao_nr")
+    col_rf12, col_rf13 = st.columns(2)
+    with col_rf12:
+        folhas_complementares_rf = st.number_input("Folhas Complementares (quantidade)", min_value=0, step=1, key="rf_folhas_complementares")
+    with col_rf13:
+        bo_cadg_nr_rf = st.text_input("BO CADG nº", key="rf_bo_cadg_nr")
+
+    st.markdown("#### 1. DOS FATOS — 1. HISTÓRICO")
+    fatos_historico_rf = campo_texto_com_voz("Histórico", "rf_fatos_historico", altura=220)
+
+    st.markdown("##### Fotos")
+    novas_fotos = st.file_uploader("Adicionar fotos", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="rf_fotos_upload")
+    if novas_fotos:
+        for arquivo_foto in novas_fotos:
+            try:
+                dados_b64 = base64.b64encode(arquivo_foto.getvalue()).decode("utf-8")
+                if not any(f.get("nome") == arquivo_foto.name and f.get("dados_base64") == dados_b64 for f in st.session_state["rf_fotos_list"]):
+                    st.session_state["rf_fotos_list"].append({"nome": arquivo_foto.name, "legenda": "", "dados_base64": dados_b64})
+            except Exception:
+                pass
+
+    for i_foto, foto in enumerate(st.session_state["rf_fotos_list"]):
+        col_f1, col_f2, col_f3 = st.columns([2, 5, 1])
+        with col_f1:
+            try:
+                st.image(base64.b64decode(foto["dados_base64"]), width=100)
+            except Exception:
+                st.caption("(imagem)")
+        with col_f2:
+            foto["legenda"] = st.text_input(f"Legenda da foto {i_foto+1}", value=foto.get("legenda", ""), key=f"rf_legenda_foto_{i_foto}", label_visibility="collapsed", placeholder=f"Ex: Foto {i_foto+1}: descrição...")
+        with col_f3:
+            if st.button("🗑️", key=f"rf_del_foto_{i_foto}"):
+                st.session_state["rf_fotos_list"].pop(i_foto)
+                st.rerun()
+
+    st.markdown("#### 2. DO VALOR DA MULTA")
+    valor_multa_texto_rf = campo_texto_com_voz("Texto sobre a multa", "rf_valor_multa_texto", altura=100)
+
+    st.markdown("#### 3. DAS PROVIDÊNCIAS ADMINISTRATIVAS")
+    providencias_rf = campo_texto_com_voz("Providências (uma por linha)", "rf_providencias", altura=150)
+
+    st.markdown("#### Assinatura")
+    col_rf14, col_rf15 = st.columns(2)
+    with col_rf14:
+        municipio_assinatura_rf = st.text_input("Município (assinatura)", value=st.session_state.get("rf_municipio_assinatura", "Miranda (MS)"), key="rf_municipio_assinatura")
+    with col_rf15:
+        data_assinatura_rf = st.date_input("Data da Assinatura", value=datetime.now(), key="rf_data_assinatura")
+    relator_rf = st.selectbox("Relator (Comandante)", EFETIVO[st.session_state["unidade_operacional"]], key="rf_relator")
+    matricula_relator_rf = MATRICULAS.get(relator_rf, "")
+    st.caption(f"Matrícula: {matricula_relator_rf or '— não cadastrada —'}")
+    cargo_relator_rf = st.text_input("Cargo/Função", value=st.session_state.get("rf_cargo_relator", "Cmt. da GU Ambiental/Relator"), key="rf_cargo_relator")
+
+    if st.button("💾 Salvar Relatório de Fiscalização", type="primary", use_container_width=True):
+        dados_rf = {
+            "interessado": interessado_rf, "nome_autuado": nome_autuado_rf, "cpf_cnpj": cpf_cnpj_rf,
+            "rg_ie": rg_ie_rf, "endereco": endereco_rf, "local_fiscalizacao": local_rf,
+            "data_fiscalizacao": data_fiscalizacao_rf, "coordenadas": coordenadas_rf, "municipio": municipio_rf,
+            "telefone": telefone_rf, "legislacao": legislacao_rf, "auto_infracao_nr": auto_infracao_nr_rf,
+            "laudo_constatacao_nr": laudo_constatacao_nr_rf, "termo_paralisacao_nr": termo_paralisacao_nr_rf,
+            "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
+            "bo_cadg_nr": bo_cadg_nr_rf, "fatos_historico": fatos_historico_rf,
+            "fotos": json.dumps(st.session_state["rf_fotos_list"], ensure_ascii=False),
+            "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
+            "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
+            "relator": relator_rf, "matricula_relator": matricula_relator_rf, "cargo_relator": cargo_relator_rf,
+            "status": "Finalizado"
+        }
+        if not st.session_state["rf_id_atual"]:
+            ano_rf = data_fiscalizacao_rf.year
+            sequencial_rf = proximo_numero_fiscalizacao(st.session_state["unidade_operacional"], ano_rf)
+            designacao_rf = DESIGNACAO_UNIDADE_FISCALIZACAO.get(st.session_state["unidade_operacional"], "")
+            numero_rf = f"{sequencial_rf:02d}/{designacao_rf}/{ano_rf}"
+            dados_rf["numero"] = numero_rf
+            dados_rf["sequencial"] = sequencial_rf
+            dados_rf["ano"] = ano_rf
+            dados_rf["unidade"] = st.session_state["unidade_operacional"]
+
+        novo_id_rf, erro_rf = salvar_relatorio_fiscalizacao(
+            dados_rf, id_existente=st.session_state["rf_id_atual"], usuario_atual=st.session_state.get("usuario_conectado", "")
+        )
+        if erro_rf:
+            st.error(f"Falha ao salvar: {erro_rf}")
+        else:
+            st.session_state["rf_id_atual"] = novo_id_rf
+            if not st.session_state.get("rf_numero_atual"):
+                st.session_state["rf_numero_atual"] = dados_rf.get("numero")
+            st.success(f"✅ Relatório Nº {st.session_state['rf_numero_atual']} salvo com sucesso!")
+
+            dados_rf["numero"] = st.session_state["rf_numero_atual"]
+            buffer_docx = gerar_docx_fiscalizacao(dados_rf)
+            st.download_button(
+                "⬇️ Baixar Documento (.docx)", buffer_docx,
+                file_name=f"Relatorio_Fiscalizacao_{st.session_state['rf_numero_atual'].replace('/', '-')}.docx",
+                use_container_width=True
+            )
+
+# ------------------------------------------
+# VISÃO 2: PAINEL ESTRATÉGICO (ADMIN)
+# ------------------------------------------
 with aba_adm:
     st.markdown("# PAINEL GERENCIAL DA ADMINISTRAÇÃO")
     senha = st.text_input("Insira a senha administrativa", type="password", key="input_senha")
@@ -1814,6 +2333,129 @@ with aba_adm:
                                 st.warning("Nenhum resultado encontrado para esse termo nesse ano.")
                         else:
                             st.caption("Escolha o ano, digite um termo de busca e clique em \"🔎 Buscar\".")
+
+                    # --- GERENCIAMENTO DE RELATÓRIOS DE FISCALIZAÇÃO AMBIENTAL (as duas unidades) ---
+                    st.divider()
+                    with st.expander("📋 Relatórios de Fiscalização Ambiental (buscar, visualizar, editar, excluir)"):
+                        if st.session_state.get("carregar_edicao_rf_admin") is not None:
+                            _reg_adm = st.session_state.pop("carregar_edicao_rf_admin")
+                            for _campo, _chave_ss in [
+                                ("interessado", "rf_adm_interessado"), ("nome_autuado", "rf_adm_nome_autuado"),
+                                ("cpf_cnpj", "rf_adm_cpf_cnpj"), ("rg_ie", "rf_adm_rg_ie"), ("endereco", "rf_adm_endereco"),
+                                ("local_fiscalizacao", "rf_adm_local"), ("coordenadas", "rf_adm_coordenadas"),
+                                ("municipio", "rf_adm_municipio"), ("telefone", "rf_adm_telefone"),
+                                ("legislacao", "rf_adm_legislacao"), ("auto_infracao_nr", "rf_adm_auto_infracao_nr"),
+                                ("laudo_constatacao_nr", "rf_adm_laudo_constatacao_nr"), ("termo_paralisacao_nr", "rf_adm_termo_paralisacao_nr"),
+                                ("notificacao_nr", "rf_adm_notificacao_nr"), ("bo_cadg_nr", "rf_adm_bo_cadg_nr"),
+                                ("fatos_historico", "rf_adm_fatos_historico"), ("valor_multa_texto", "rf_adm_valor_multa_texto"),
+                                ("providencias", "rf_adm_providencias"), ("cargo_relator", "rf_adm_cargo_relator")
+                            ]:
+                                st.session_state[_chave_ss] = _reg_adm.get(_campo, "") or ""
+                            st.session_state["rf_adm_folhas_complementares"] = _reg_adm.get("folhas_complementares", 0) or 0
+                            st.session_state["rf_adm_id_atual"] = _reg_adm["id"]
+                            st.session_state["rf_adm_numero_atual"] = _reg_adm.get("numero", "")
+                            st.session_state["rf_adm_unidade_atual"] = _reg_adm.get("unidade", "")
+
+                        with st.form("form_busca_rf_admin"):
+                            termo_rf_adm = st.text_input("Buscar por número ou nome do autuado (todas as unidades)", key="termo_busca_rf_admin")
+                            buscar_rf_admin_clicado = st.form_submit_button("🔎 Buscar")
+
+                        if buscar_rf_admin_clicado and termo_rf_adm:
+                            st.session_state["ultima_busca_rf_admin"] = termo_rf_adm
+
+                        termo_rf_admin_ativo = st.session_state.get("ultima_busca_rf_admin")
+                        if termo_rf_admin_ativo:
+                            resultados_rf_admin = buscar_relatorios_fiscalizacao(termo_rf_admin_ativo)
+                            if not resultados_rf_admin:
+                                st.warning("Nenhum relatório encontrado.")
+                            for reg_rf in resultados_rf_admin:
+                                with st.container(border=True):
+                                    st.markdown(f"**Nº {reg_rf.get('numero','')}** — {reg_rf.get('nome_autuado','')} | {reg_rf.get('unidade','')}")
+                                    st.caption(f"Criado por: {reg_rf.get('criado_por','') or '—'}" + (f" · Editado por: {reg_rf.get('editado_por')} em {reg_rf.get('data_edicao')}" if reg_rf.get('editado_por') else ""))
+                                    col_rfa1, col_rfa2, col_rfa3 = st.columns(3)
+                                    with col_rfa1:
+                                        if st.button("👁️ Visualizar/Editar", key=f"ver_rf_adm_{reg_rf['id']}", use_container_width=True):
+                                            st.session_state["carregar_edicao_rf_admin"] = reg_rf
+                                            st.rerun()
+                                    with col_rfa2:
+                                        try:
+                                            _buffer_rf_view = gerar_docx_fiscalizacao(dict(reg_rf))
+                                            st.download_button(
+                                                "⬇️ Baixar .docx", _buffer_rf_view,
+                                                file_name=f"Relatorio_Fiscalizacao_{reg_rf.get('numero','').replace('/', '-')}.docx",
+                                                key=f"baixar_rf_adm_{reg_rf['id']}", use_container_width=True
+                                            )
+                                        except Exception:
+                                            st.caption("Não foi possível gerar o .docx")
+                                    with col_rfa3:
+                                        with st.popover("🗑️ Excluir", use_container_width=True):
+                                            st.warning("Essa ação é definitiva e não pode ser desfeita.")
+                                            if st.button("Confirmar exclusão", key=f"confirmar_exclusao_rf_{reg_rf['id']}", use_container_width=True):
+                                                if excluir_relatorio_fiscalizacao(reg_rf["id"]):
+                                                    st.success("Relatório excluído.")
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Falha ao excluir — sem conexão com o banco.")
+
+                        if st.session_state.get("rf_adm_id_atual"):
+                            st.divider()
+                            st.markdown(f"#### ✏️ Editando Relatório Nº {st.session_state.get('rf_adm_numero_atual','')}")
+                            rf_adm_interessado = st.text_input("Interessado", key="rf_adm_interessado")
+                            rf_adm_nome_autuado = st.text_input("01 - Nome/Nome Empresarial", key="rf_adm_nome_autuado")
+                            col_rfa4, col_rfa5 = st.columns(2)
+                            with col_rfa4:
+                                rf_adm_cpf_cnpj = st.text_input("02 - CPF/CNPJ", key="rf_adm_cpf_cnpj")
+                            with col_rfa5:
+                                rf_adm_rg_ie = st.text_input("03 - RG/Insc. Estadual", key="rf_adm_rg_ie")
+                            rf_adm_endereco = st.text_area("04 - Endereço Completo", key="rf_adm_endereco")
+                            rf_adm_local = st.text_area("05 - Local", key="rf_adm_local")
+                            rf_adm_coordenadas = st.text_input("07 - Coord. Geográfica", key="rf_adm_coordenadas")
+                            rf_adm_municipio = st.text_input("08 - Município", key="rf_adm_municipio")
+                            rf_adm_telefone = st.text_input("09 - Telefone", key="rf_adm_telefone")
+                            rf_adm_legislacao = st.text_area("10 - Legislação", key="rf_adm_legislacao")
+                            col_rfa6, col_rfa7 = st.columns(2)
+                            with col_rfa6:
+                                rf_adm_auto_infracao_nr = st.text_input("Auto de Infração nº", key="rf_adm_auto_infracao_nr")
+                            with col_rfa7:
+                                rf_adm_laudo_constatacao_nr = st.text_input("Laudo de Constatação nº", key="rf_adm_laudo_constatacao_nr")
+                            col_rfa8, col_rfa9 = st.columns(2)
+                            with col_rfa8:
+                                rf_adm_termo_paralisacao_nr = st.text_input("Termo de Paralisação nº", key="rf_adm_termo_paralisacao_nr")
+                            with col_rfa9:
+                                rf_adm_notificacao_nr = st.text_input("Notificação nº", key="rf_adm_notificacao_nr")
+                            col_rfa10, col_rfa11 = st.columns(2)
+                            with col_rfa10:
+                                rf_adm_folhas_complementares = st.number_input("Folhas Complementares", min_value=0, step=1, key="rf_adm_folhas_complementares")
+                            with col_rfa11:
+                                rf_adm_bo_cadg_nr = st.text_input("BO CADG nº", key="rf_adm_bo_cadg_nr")
+                            rf_adm_fatos_historico = st.text_area("1. Histórico", key="rf_adm_fatos_historico", height=200)
+                            rf_adm_valor_multa_texto = st.text_area("2. Valor da Multa", key="rf_adm_valor_multa_texto")
+                            rf_adm_providencias = st.text_area("3. Providências Administrativas", key="rf_adm_providencias")
+                            rf_adm_cargo_relator = st.text_input("Cargo/Função do Relator", key="rf_adm_cargo_relator")
+
+                            if st.button("💾 Salvar Alterações", type="primary", key="salvar_rf_admin", use_container_width=True):
+                                dados_rf_adm = {
+                                    "interessado": rf_adm_interessado, "nome_autuado": rf_adm_nome_autuado,
+                                    "cpf_cnpj": rf_adm_cpf_cnpj, "rg_ie": rf_adm_rg_ie, "endereco": rf_adm_endereco,
+                                    "local_fiscalizacao": rf_adm_local, "coordenadas": rf_adm_coordenadas,
+                                    "municipio": rf_adm_municipio, "telefone": rf_adm_telefone,
+                                    "legislacao": rf_adm_legislacao, "auto_infracao_nr": rf_adm_auto_infracao_nr,
+                                    "laudo_constatacao_nr": rf_adm_laudo_constatacao_nr, "termo_paralisacao_nr": rf_adm_termo_paralisacao_nr,
+                                    "notificacao_nr": rf_adm_notificacao_nr, "folhas_complementares": rf_adm_folhas_complementares,
+                                    "bo_cadg_nr": rf_adm_bo_cadg_nr, "fatos_historico": rf_adm_fatos_historico,
+                                    "valor_multa_texto": rf_adm_valor_multa_texto, "providencias": rf_adm_providencias,
+                                    "cargo_relator": rf_adm_cargo_relator
+                                }
+                                _id_rf_adm, _erro_rf_adm = salvar_relatorio_fiscalizacao(
+                                    dados_rf_adm, id_existente=st.session_state["rf_adm_id_atual"],
+                                    usuario_atual=st.session_state.get("usuario_conectado", "")
+                                )
+                                if _erro_rf_adm:
+                                    st.error(f"Falha ao salvar: {_erro_rf_adm}")
+                                else:
+                                    st.success(f"✅ Alterações salvas — registrado como editado por {st.session_state.get('usuario_conectado','')}.")
+                                    st.session_state["rf_adm_id_atual"] = None
+                                    st.rerun()
 
                     # Abas do Dashboard Administrativo
                     tab_geral, tab_unidades, tab_equipes = st.tabs(["📊 Produção Geral", "🏢 Por Unidade", "🪖 Por Equipes (Efetivo)"])
