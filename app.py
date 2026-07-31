@@ -14,6 +14,11 @@ import io
 from datetime import datetime, timedelta
 from docx import Document
 from docx.shared import Pt, Cm
+from logica import (
+    extrair_trecho, melhor_correspondencia_nome, extrair_viatura,
+    interpretar_guarnicao_por_voz, calcular_km_rodado, status_troca_oleo,
+    formatar_numero_fiscalizacao
+)
 
 def exibir_logo(caminho, width):
     """Mostra uma imagem de logo sem derrubar o app se o arquivo não existir
@@ -742,10 +747,10 @@ MATRICULAS = {
 # SUBSTITUA pela lista real assim que você tiver as placas em mãos.
 VIATURAS_PLACAS = [
     "REY8G14",
-    "Placa RWE6B39",
-    "Placa SMK2J66 3",
-    "Placa QAB4447",
-    "Placa PBU6375"
+    "RWE6B39",
+    "SMK2J66",
+    "QAB4447",
+    "PBU6375"
 ]
 
 # Catálogo de armamento/munição da unidade: código -> nome/descrição.
@@ -812,75 +817,6 @@ def campo_texto_com_voz(label, key, altura=100, placeholder=None):
     with col_txt:
         valor = st.text_area(label, key=key, height=altura, placeholder=placeholder)
     return valor
-
-def _extrair_trecho(chave, marcadores, texto_lower, texto_original):
-    """Pega o texto entre uma palavra-chave e a próxima palavra-chave conhecida."""
-    idx = texto_lower.find(chave)
-    if idx == -1:
-        return None
-    inicio = idx + len(chave)
-    fim = len(texto_original)
-    for outro in marcadores:
-        if outro == chave:
-            continue
-        idx_outro = texto_lower.find(outro, inicio)
-        if idx_outro != -1 and idx_outro < fim:
-            fim = idx_outro
-    return texto_original[inicio:fim].strip(" :,-")
-
-def _melhor_correspondencia_nome(trecho, nomes_validos):
-    """Casa um trecho de fala (ex.: 'sargento madson') com o nome completo mais
-    parecido da lista do efetivo (ex.: '3º Sargento PM Madson Acosta Flores')."""
-    if not trecho:
-        return None
-    candidatos = difflib.get_close_matches(trecho, nomes_validos, n=1, cutoff=0.3)
-    if candidatos:
-        return candidatos[0]
-    palavras_trecho = [p for p in re.split(r'\s+', trecho.lower()) if len(p) > 2]
-    melhor, melhor_pontos = None, 0
-    for nome in nomes_validos:
-        nome_lower = nome.lower()
-        pontos = sum(1 for p in palavras_trecho if p in nome_lower)
-        if pontos > melhor_pontos:
-            melhor, melhor_pontos = nome, pontos
-    return melhor if melhor_pontos > 0 else None
-
-def _extrair_viatura(trecho):
-    """Procura, dentro do trecho falado, uma palavra com letras E números
-    misturados (formato típico de prefixo/placa, ex.: RWE6B39)."""
-    if not trecho:
-        return None
-    palavras = re.findall(r'[A-Za-z0-9\-]+', trecho)
-    candidatos = [p for p in palavras if re.search(r'[A-Za-z]', p) and re.search(r'\d', p)]
-    if candidatos:
-        return candidatos[0].upper()
-    return palavras[-1].upper() if palavras else None
-
-def interpretar_guarnicao_por_voz(texto, unidade):
-    """Extrai comandante, motorista, viatura e KM inicial de uma frase falada
-    de uma só vez, casando nomes com o efetivo cadastrado da unidade.
-    Retorna um dicionário; campos não identificados vêm como None."""
-    texto_lower = texto.lower()
-    nomes_validos = EFETIVO.get(unidade, [])
-    marcadores = ["comandante", "motorista", "viatura", "prefixo", "km inicial", "quilometragem inicial"]
-
-    trecho_cmt = _extrair_trecho("comandante", marcadores, texto_lower, texto)
-    trecho_mot = _extrair_trecho("motorista", marcadores, texto_lower, texto)
-    trecho_viat = _extrair_trecho("viatura", marcadores, texto_lower, texto) or \
-                  _extrair_trecho("prefixo", marcadores, texto_lower, texto)
-
-    km_inicial = None
-    m_km = re.search(r'km\s*inicial\D{0,6}(\d[\d\.]*)', texto_lower) or \
-           re.search(r'quilometragem\s*inicial\D{0,6}(\d[\d\.]*)', texto_lower)
-    if m_km:
-        km_inicial = int(m_km.group(1).replace(".", ""))
-
-    return {
-        "comandante": _melhor_correspondencia_nome(trecho_cmt, nomes_validos),
-        "motorista": _melhor_correspondencia_nome(trecho_mot, nomes_validos),
-        "viatura": _extrair_viatura(trecho_viat),
-        "km_inicial": km_inicial
-    }
 
 # ==========================================
 # FUNÇÃO AUXILIAR: CAMPO COM MÚLTIPLOS REGISTROS (BOTÃO "+")
@@ -1041,7 +977,7 @@ with aba_policial:
             if audio_guarnicao is not None:
                 with st.spinner("Transcrevendo e interpretando..."):
                     texto_guarnicao = transcrever_audio(audio_guarnicao.getvalue())
-                    resultado_voz = interpretar_guarnicao_por_voz(texto_guarnicao, unidade_sel) if texto_guarnicao else None
+                    resultado_voz = interpretar_guarnicao_por_voz(texto_guarnicao, EFETIVO.get(unidade_sel, [])) if texto_guarnicao else None
                 st.session_state["audio_geracao_guarnicao"] = geracao_g + 1
                 st.session_state["voz_guarnicao_transcricao"] = texto_guarnicao
                 st.session_state["voz_guarnicao_resultado"] = resultado_voz
@@ -1128,11 +1064,11 @@ with aba_policial:
                 else:
                     st.error("Falha ao salvar — sem conexão com o banco.")
 
-    km_desde_troca = km_inicial - ultima_troca_km
-    if 9500 <= km_desde_troca < 10000:
-        st.warning(f"🛢️ Faltam {10000 - km_desde_troca:.0f} km para a próxima troca de óleo desta viatura!")
-    elif km_desde_troca >= 10000:
-        st.error(f"🛢️ Troca de óleo atrasada! Já rodou {km_desde_troca:.0f} km desde a última troca.")
+    _situacao_oleo, _msg_oleo = status_troca_oleo(km_inicial, ultima_troca_km)
+    if _situacao_oleo == "alerta":
+        st.warning(f"🛢️ {_msg_oleo}")
+    elif _situacao_oleo == "atrasado":
+        st.error(f"🛢️ {_msg_oleo}")
 
     observacao_viatura = campo_texto_com_voz("Observação sobre a Viatura/Embarcação", "observacao_viatura_input", altura=70)
 
@@ -1141,7 +1077,7 @@ with aba_policial:
         key="encerrar_servico_check"
     )
 
-    km_rodado_calc = km_final - km_inicial if (encerrar_servico and km_final >= km_inicial) else 0
+    km_rodado_calc = calcular_km_rodado(km_inicial, km_final) if encerrar_servico else 0
     st.metric("Distância Total Percorrida (KM Rodado)", f"{km_rodado_calc} km" if encerrar_servico else "Disponível no encerramento")
 
     def autosave_parcial():
@@ -1191,12 +1127,12 @@ with aba_policial:
             tipo_animal = st.selectbox("Animal Capturado", ["Não se aplica", "Silvestre", "Doméstico"], key="tipo_animal")
             quantidade_animal = st.number_input("Quantidade de Animais", min_value=0, step=1, key="qtd_animal")
         with col_anim2:
-            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Jaguatirica", "Papagaio","cachorro", "Gato", "Cavalo", "Gado", "Cabra", "Carneiro", "Gavião", "Teiú", "Tatu Galinha", "Tatu Peba", "Tucano", "Outro"]
+            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
             especie_animal = st.selectbox("Espécie do Animal", lista_especies, key="especie_animal")
             cadg_animal = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_animal_input")
         with col_anim3:
             avaliacao_animal = st.selectbox("Avaliação do Estado do Animal", ["Não se aplica", "Ótima", "Boa", "Ruim"], key="avaliacao_animal")
-            lista_origens = ["Não se aplica", "Anastácio", "Aquidauana", "Bodoquena", "Corumbá", "Miranda", "BR-262", "MS-339", "Residência de Miranda", "Entregue no Pelotão"]
+            lista_origens = ["Não se aplica", "Miranda", "Bodoquena", "BR-262", "MS-339", "Residência de Miranda", "Residência de Bodoquena", "Entregue no Pelotão"]
             origem_animal = st.selectbox("Origem / Local da Captura", lista_origens, key="origem_animal")
 
         col_anim_txt1, col_anim_txt2 = st.columns(2)
@@ -1280,7 +1216,7 @@ with aba_policial:
             vistorias_t = st.number_input("Qtd Vistorias", min_value=0, step=1, key="vistorias_t_input")
             cadg_t = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_t_input")
         with col_t2:
-            fin_t = st.selectbox("Finalidade", ["Barreira", "Fiscalização", "NUGEO", "Patrulhamento Preventivo", "Patrulhamento Terrestre", "Patrulhamento Fluvial", "Prolepse", "Verificação de Denúncia", "Vistoria"], key="fin_t_input")
+            fin_t = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Prolepse"], key="fin_t_input")
             dist_t = st.number_input("Distância Percorrida (KM)", min_value=0.0, step=0.1, key="dist_t_input")
             fiscalizacoes_t = st.number_input("Qtd Fiscalizações", min_value=0, step=1, key="fiscalizacoes_t_input")
         with col_t3:
@@ -1443,7 +1379,7 @@ with aba_policial:
             pescadores_f = st.number_input("Qtd Pescadores Abordados", min_value=0, step=1, key="pescadores_f_input")
             vistorias_f = st.number_input("Qtd Vistorias (Fluvial)", min_value=0, step=1, key="vistorias_f_input")
         with col_f2:
-            fin_f = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Patrulhamento Terrestre", "Patrulhamento Fluvial", "Prolepse"], key="fin_f_input")
+            fin_f = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Prolepse"], key="fin_f_input")
             dist_f = st.number_input("Distância Percorrida (KM/Milhas)", min_value=0.0, step=0.1, key="dist_f_input")
             apreenso_f = st.number_input("Qtd Apreensões (Fluvial)", min_value=0, step=1, key="apreenso_f_input")
         with col_f3:
@@ -2119,7 +2055,7 @@ with aba_fiscalizacao:
             ano_rf = data_fiscalizacao_rf.year
             sequencial_rf = proximo_numero_fiscalizacao(st.session_state["unidade_operacional"], ano_rf)
             designacao_rf = DESIGNACAO_UNIDADE_FISCALIZACAO.get(st.session_state["unidade_operacional"], "")
-            numero_rf = f"{sequencial_rf:02d}/{designacao_rf}/{ano_rf}"
+            numero_rf = formatar_numero_fiscalizacao(sequencial_rf, designacao_rf, ano_rf)
             dados_rf["numero"] = numero_rf
             dados_rf["sequencial"] = sequencial_rf
             dados_rf["ano"] = ano_rf
