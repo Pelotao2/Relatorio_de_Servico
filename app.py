@@ -741,10 +741,11 @@ MATRICULAS = {
 # Placas/prefixos de todas as viaturas e embarcações da unidade.
 # SUBSTITUA pela lista real assim que você tiver as placas em mãos.
 VIATURAS_PLACAS = [
-    "RWE8G14",
-    "Placa Viatura 2",
-    "Placa Viatura 3",
-    "Placa Embarcação 1"
+    "REY8G14",
+    "Placa RWE6B39",
+    "Placa SMK2J66 3",
+    "Placa QAB4447",
+    "Placa PBU6375"
 ]
 
 # Catálogo de armamento/munição da unidade: código -> nome/descrição.
@@ -1190,12 +1191,12 @@ with aba_policial:
             tipo_animal = st.selectbox("Animal Capturado", ["Não se aplica", "Silvestre", "Doméstico"], key="tipo_animal")
             quantidade_animal = st.number_input("Quantidade de Animais", min_value=0, step=1, key="qtd_animal")
         with col_anim2:
-            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
+            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Jaguatirica", "Papagaio","cachorro", "Gato", "Cavalo", "Gado", "Cabra", "Carneiro", "Gavião", "Teiú", "Tatu Galinha", "Tatu Peba", "Tucano", "Outro"]
             especie_animal = st.selectbox("Espécie do Animal", lista_especies, key="especie_animal")
             cadg_animal = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_animal_input")
         with col_anim3:
             avaliacao_animal = st.selectbox("Avaliação do Estado do Animal", ["Não se aplica", "Ótima", "Boa", "Ruim"], key="avaliacao_animal")
-            lista_origens = ["Não se aplica", "Miranda", "Bodoquena", "BR-262", "MS-339", "Residência de Miranda", "Residência de Bodoquena", "Entregue no Pelotão"]
+            lista_origens = ["Não se aplica", "Anastácio", "Aquidauana", "Bodoquena", "Corumbá", "Miranda", "BR-262", "MS-339", "Residência de Miranda", "Entregue no Pelotão"]
             origem_animal = st.selectbox("Origem / Local da Captura", lista_origens, key="origem_animal")
 
         col_anim_txt1, col_anim_txt2 = st.columns(2)
@@ -1279,7 +1280,7 @@ with aba_policial:
             vistorias_t = st.number_input("Qtd Vistorias", min_value=0, step=1, key="vistorias_t_input")
             cadg_t = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_t_input")
         with col_t2:
-            fin_t = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Prolepse"], key="fin_t_input")
+            fin_t = st.selectbox("Finalidade", ["Barreira", "Fiscalização", "NUGEO", "Patrulhamento Preventivo", "Patrulhamento Terrestre", "Patrulhamento Fluvial", "Prolepse", "Verificação de Denúncia", "Vistoria"], key="fin_t_input")
             dist_t = st.number_input("Distância Percorrida (KM)", min_value=0.0, step=0.1, key="dist_t_input")
             fiscalizacoes_t = st.number_input("Qtd Fiscalizações", min_value=0, step=1, key="fiscalizacoes_t_input")
         with col_t3:
@@ -1442,7 +1443,7 @@ with aba_policial:
             pescadores_f = st.number_input("Qtd Pescadores Abordados", min_value=0, step=1, key="pescadores_f_input")
             vistorias_f = st.number_input("Qtd Vistorias (Fluvial)", min_value=0, step=1, key="vistorias_f_input")
         with col_f2:
-            fin_f = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Prolepse"], key="fin_f_input")
+            fin_f = st.selectbox("Finalidade", ["NUGEO", "Fiscalização", "Vistoria", "Verificação de Denúncia", "Patrulhamento Preventivo", "Patrulhamento Terrestre", "Patrulhamento Fluvial", "Prolepse"], key="fin_f_input")
             dist_f = st.number_input("Distância Percorrida (KM/Milhas)", min_value=0.0, step=0.1, key="dist_f_input")
             apreenso_f = st.number_input("Qtd Apreensões (Fluvial)", min_value=0, step=1, key="apreenso_f_input")
         with col_f3:
