@@ -714,11 +714,11 @@ EFETIVO = {
         "2º Sargento PM Rafael Bucinsky Fontes",
         "3º Sargento PM Augusto Graça",
         "3º Sargento PM Macsuel Vilalba Santana",
-        "3º Sargento PM Madson Acosta Flores",
         "Cabo PM Edmar Falcão Santana"
     ],
     "GPM Barra": [
         "3º Sargento PM Luiz Alberto Antonieto",
+        "3º Sargento PM Madson Acosta Flores",
         "3º Sargento PM Diego Aguilera Romeiro",
         "Cabo PM Luiz Henrique da Silva Ferreira",
         "Cabo PM Thiago David Mareco de Souza"
@@ -750,7 +750,8 @@ VIATURAS_PLACAS = [
     "RWE6B39",
     "SMK2J66",
     "QAB4447",
-    "PBU6375"
+    "PBU6375",
+    "NRZ4091"
 ]
 
 # Catálogo de armamento/munição da unidade: código -> nome/descrição.
