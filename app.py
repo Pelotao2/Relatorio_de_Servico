@@ -6,6 +6,7 @@ from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 import time
+import html
 import json
 import re
 import difflib
@@ -131,6 +132,7 @@ st.set_page_config(page_title="Sistema de Produtividade - Pelotão", page_icon="
 # de imprimir/salvar em PDF, deixando o relatório mais limpo no papel.
 st.markdown("""
     <style>
+    .print-only-text { display: none; }
     @media print {
         header[data-testid="stHeader"],
         div[data-testid="stToolbar"],
@@ -138,6 +140,14 @@ st.markdown("""
         div[data-baseweb="tab-list"],
         .stButton, .stDownloadButton, #MainMenu, footer {
             display: none !important;
+        }
+        [data-testid="stTextArea"], textarea {
+            display: none !important;
+        }
+        .print-only-text {
+            display: block !important;
+            white-space: pre-wrap;
+            margin-bottom: 12px;
         }
         body, p, span, div, label { font-size: 11px !important; }
         h1 { font-size: 18px !important; }
@@ -797,7 +807,7 @@ def campo_texto_com_voz(label, key, altura=100, placeholder=None):
     """Campo de texto com botão de ditado por voz ao lado (🎙️). Use no lugar de
     st.text_area(label, key=key) em qualquer campo de relato/observação."""
     col_txt, col_mic = st.columns([9, 1])
-    if VOZ_DISPONIVEL:
+    if False:  # comando de voz desativado temporariamente (nunca funcionou direito)
         with col_mic:
             with st.popover("🎙️", use_container_width=True):
                 st.caption("Grave sua fala — o texto é transcrito automaticamente.")
@@ -817,6 +827,11 @@ def campo_texto_com_voz(label, key, altura=100, placeholder=None):
                     st.rerun()
     with col_txt:
         valor = st.text_area(label, key=key, height=altura, placeholder=placeholder)
+        texto_impressao = html.escape(valor or "—").replace("\n", "<br>")
+        st.markdown(
+            f'<div class="print-only-text"><strong>{html.escape(label)}:</strong><br>{texto_impressao}</div>',
+            unsafe_allow_html=True
+        )
     return valor
 
 # ==========================================
@@ -1882,7 +1897,8 @@ with aba_fiscalizacao:
         _reg = st.session_state.pop("carregar_edicao_rf")
         st.session_state["rf_id_atual"] = _reg["id"]
         st.session_state["rf_numero_atual"] = _reg.get("numero")
-        st.session_state["rf_interessado"] = _reg.get("interessado", "")
+        _interessado_carregado = _reg.get("interessado", "") or ""
+        st.session_state["rf_interessado_multi"] = [v.strip() for v in _interessado_carregado.split(";") if v.strip()]
         st.session_state["rf_nome_autuado"] = _reg.get("nome_autuado", "")
         st.session_state["rf_cpf_cnpj"] = _reg.get("cpf_cnpj", "")
         st.session_state["rf_rg_ie"] = _reg.get("rg_ie", "")
@@ -1947,8 +1963,20 @@ with aba_fiscalizacao:
                 st.session_state["rf_numero_atual"] = None
                 st.rerun()
 
-    interessado_rf = st.text_input("Interessado", value=st.session_state.get("rf_interessado", "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)", " Ministério Público Estadual(MPE)", "CPamb/1ºBPMA"), key="rf_interessado")
+    lista_interessados_padrao = [
+        "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)",
+        "Ministério Público Estadual (MPE)",
+        "CPAmb/1ºBPMA"
+    ]
+    if "rf_interessado_multi" not in st.session_state:
+        st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
 
+    interessados_sel_rf = st.multiselect(
+        "Interessado(s)",
+        options=lista_interessados_padrao,
+        key="rf_interessado_multi"
+    )
+    interessado_rf = "; ".join(interessados_sel_rf)
     st.markdown("#### DO AUTUADO/FISCALIZADO")
     nome_autuado_rf = st.text_input("01 - Nome/Nome Empresarial", key="rf_nome_autuado")
     col_rf1, col_rf2 = st.columns(2)
@@ -1957,11 +1985,18 @@ with aba_fiscalizacao:
     with col_rf2:
         rg_ie_rf = st.text_input("03 - RG/Insc. Estadual", key="rf_rg_ie")
     endereco_rf = st.text_area("04 - Endereço Completo", key="rf_endereco", height=70)
-
+    st.markdown(
+        f'<div class="print-only-text"><strong>Endereço Completo:</strong><br>{html.escape(endereco_rf or "—").replace(chr(10), "<br>")}</div>',
+        unsafe_allow_html=True
+    )
     st.markdown("#### DA INFRAÇÃO/FISCALIZAÇÃO")
     col_rf3, col_rf4 = st.columns(2)
     with col_rf3:
         local_rf = st.text_area("05 - Local", key="rf_local", height=70)
+        st.markdown(
+            f'<div class="print-only-text"><strong>Local:</strong><br>{html.escape(local_rf or "—").replace(chr(10), "<br>")}</div>',
+            unsafe_allow_html=True
+        )
     with col_rf4:
         data_fiscalizacao_rf = st.date_input("06 - Data", value=datetime.now(), key="rf_data_fiscalizacao")
     col_rf5, col_rf6, col_rf7 = st.columns(3)
