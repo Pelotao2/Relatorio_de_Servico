@@ -1947,7 +1947,7 @@ with aba_fiscalizacao:
                 st.session_state["rf_numero_atual"] = None
                 st.rerun()
 
-    interessado_rf = st.text_input("Interessado", value=st.session_state.get("rf_interessado", "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)"), key="rf_interessado")
+    interessado_rf = st.text_input("Interessado", value=st.session_state.get("rf_interessado", "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)", " Ministério Público Estadual(MPE)", "CPamb/1ºBPMA"), key="rf_interessado")
 
     st.markdown("#### DO AUTUADO/FISCALIZADO")
     nome_autuado_rf = st.text_input("01 - Nome/Nome Empresarial", key="rf_nome_autuado")
