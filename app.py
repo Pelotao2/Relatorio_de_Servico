@@ -161,6 +161,12 @@ st.markdown("""
         [data-testid="stTextArea"], textarea {
             display: none !important;
         }
+        [data-testid="stDialog"],
+        div[role="dialog"],
+        [data-testid="stModal"],
+        div[data-baseweb="modal"] {
+            display: none !important;
+        }
         .print-only-text {
             display: block !important;
             white-space: pre-wrap;
@@ -807,6 +813,16 @@ def carregar_registro_na_sessao(registro_aberto):
     st.session_state["patrulhamento_fluvial_list"] = json.loads(registro_aberto.get("patrulhamento_fluvial") or "[]")
     st.session_state["viatura_prefixo"] = registro_aberto.get("viatura_prefixo") or ""
     st.session_state["km_inicial_input"] = registro_aberto.get("km_inicial") or 0
+    # Importante: se o relatório já está "Finalizado", o checkbox "Encerrar o
+    # serviço agora" precisa vir marcado — senão o campo KM Final some da tela
+    # (fica desabilitado) e some do session_state, e quem só abriu pra
+    # visualizar/imprimir corre o risco de "perder" o KM Final salvo e ter que
+    # redigitar um valor — o que pode mascarar o KM Rodado real se salvar de novo.
+    if registro_aberto.get("status") == "Finalizado":
+        st.session_state["encerrar_servico_check"] = True
+        st.session_state["km_final_input"] = registro_aberto.get("km_final") or 0
+    else:
+        st.session_state["encerrar_servico_check"] = False
     if registro_aberto.get("data_inicial"):
         st.session_state["data_ini_sel"] = registro_aberto.get("data_inicial")
     if registro_aberto.get("data_final"):
@@ -2066,11 +2082,11 @@ with aba_policial:
     """, unsafe_allow_html=True)
 
     st.divider()
-    st.markdown("### Exportação do Relatório Corrente")
-    # OBS: st.markdown remove atributos como "onclick" por segurança, então o botão
-    # antigo nunca executava JavaScript. Usamos components.html, que roda em um
-    # iframe com JS habilitado, e chamamos window.parent.print() para imprimir
-    # a página inteira do Streamlit (não apenas o conteúdo do iframe).
+    # Este botão continua existindo só porque a impressão de CAUTELA (armamento/munição)
+    # ainda depende dele — não passa pelo modal de finalização. Para o Relatório de
+    # Serviço em si, use o botão "🖨️ Imprimir / Salvar em PDF" que aparece no modal
+    # ao clicar em "Encerrar o serviço agora".
+    st.caption("🖨️ Botão de impressão geral (usado principalmente para imprimir cautelas de armamento — o Relatório de Serviço tem seu próprio botão de impressão no modal ao finalizar).")
     components.html(
         """
         <button onclick="window.parent.print()" style="width:100%; padding:10px; background-color:#ff4b4b; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold; font-size:15px;">
