@@ -149,10 +149,13 @@ st.markdown("""
             white-space: pre-wrap;
             margin-bottom: 12px;
         }
-        body, p, span, div, label { font-size: 11px !important; }
-        h1 { font-size: 18px !important; }
-        h2, h3 { font-size: 14px !important; }
-        h4, h5, h6, .stMarkdown strong { font-size: 12px !important; }
+        body, p, span, div, label, .print-only-text, textarea, input {
+            font-family: Arial, Helvetica, sans-serif !important;
+            font-size: 12pt !important;
+        }
+        h1 { font-size: 18pt !important; }
+        h2, h3 { font-size: 15pt !important; }
+        h4, h5, h6, .stMarkdown strong { font-size: 13pt !important; }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -288,6 +291,30 @@ def proximo_numero_fiscalizacao(unidade, ano):
     finally:
         conn.close()
 
+def registrar_auditoria(relatorio_id, tipo_relatorio, acao, usuario):
+    """Grava uma linha no log de auditoria (quem fez o quê e quando).
+    Nunca interrompe o fluxo principal se falhar — ex.: se a tabela
+    'log_auditoria' ainda não existir no banco, apenas ignora em silêncio."""
+    if not relatorio_id:
+        return
+    conn = init_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO log_auditoria (relatorio_id, tipo_relatorio, acao, usuario, data_hora) VALUES (%s, %s, %s, %s, %s);",
+            (relatorio_id, tipo_relatorio, acao, usuario or "desconhecido", datetime.now())
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def salvar_relatorio_fiscalizacao(dados: dict, id_existente=None, usuario_atual=""):
     """Cria ou atualiza um Relatório de Fiscalização Ambiental. Em edições,
     registra quem alterou e quando (auditoria)."""
@@ -316,6 +343,7 @@ def salvar_relatorio_fiscalizacao(dados: dict, id_existente=None, usuario_atual=
         conn.commit()
         cur.close()
         conn.close()
+        registrar_auditoria(novo_id, "fiscalizacao", "Edição" if id_existente else "Criação", usuario_atual)
         return novo_id, None
     except Exception as e:
         conn.close()
@@ -905,9 +933,24 @@ with aba_policial:
                 if resultados_busca:
                     for reg in resultados_busca:
                         st.markdown(f"**Nº {reg['id']:04d}** — {reg.get('comandante','')} — *{reg.get('status','')}*")
-                        if st.button("👁️ Visualizar / Editar", key=f"busca_ver_{reg['id']}", use_container_width=True):
-                            carregar_registro_na_sessao(reg)
-                            st.rerun()
+                        if reg.get("status") == "Finalizado":
+                            st.caption("🔒 Relatório finalizado — protegido contra edição. Só o administrador pode liberar.")
+                            senha_desbloqueio = st.text_input(
+                                "Senha do administrador para editar", type="password",
+                                key=f"senha_desbloqueio_{reg['id']}", label_visibility="collapsed",
+                                placeholder="Senha do administrador para editar este relatório"
+                            )
+                            if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_{reg['id']}", use_container_width=True):
+                                if senha_desbloqueio == USUARIOS_PERMITIDOS.get("admin"):
+                                    carregar_registro_na_sessao(reg)
+                                    registrar_auditoria(reg['id'], "servico", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
+                                    st.rerun()
+                                else:
+                                    st.error("Senha de administrador incorreta. Edição não liberada.")
+                        else:
+                            if st.button("👁️ Visualizar / Editar", key=f"busca_ver_{reg['id']}", use_container_width=True):
+                                carregar_registro_na_sessao(reg)
+                                st.rerun()
                         st.divider()
                 else:
                     st.info("Nenhum relatório encontrado.")
@@ -1095,6 +1138,37 @@ with aba_policial:
 
     km_rodado_calc = calcular_km_rodado(km_inicial, km_final) if encerrar_servico else 0
     st.metric("Distância Total Percorrida (KM Rodado)", f"{km_rodado_calc} km" if encerrar_servico else "Disponível no encerramento")
+
+    @st.dialog("Relatório Salvo")
+    def modal_relatorio_finalizado(id_relatorio):
+        st.success(f"✅ Relatório Nº {id_relatorio:04d} finalizado e gravado com sucesso na nuvem do Pelotão!")
+        st.caption("Os dados continuam na tela até você clicar em Concluir — pode imprimir quantas vezes precisar antes disso.")
+
+        if st.session_state.get("_disparar_impressao_servico"):
+            components.html("<script>window.parent.print();</script>", height=0)
+            st.session_state["_disparar_impressao_servico"] = False
+
+        col_modal1, col_modal2 = st.columns(2)
+        with col_modal1:
+            if st.button("🖨️ Imprimir / Salvar em PDF", use_container_width=True):
+                registrar_auditoria(id_relatorio, "servico", "Impressão", st.session_state.get("usuario_conectado", ""))
+                st.session_state["_disparar_impressao_servico"] = True
+                st.rerun()
+        with col_modal2:
+            if st.button("✅ Concluir e Iniciar Novo Relatório", type="primary", use_container_width=True):
+                st.session_state["relatorio_id_atual"] = None
+                st.session_state["guarnicao_carregada_key"] = None
+                st.session_state["patrulhamento_terrestre_list"] = []
+                st.session_state["patrulhamento_fluvial_list"] = []
+                st.session_state["capturas_animais_list"] = []
+                st.session_state["apreensoes_list"] = []
+                st.session_state["prolepse_list"] = []
+                st.session_state["armamento_carregado"] = None
+                st.session_state["relatorio_aguardando_acao"] = None
+                st.rerun()
+
+    if st.session_state.get("relatorio_aguardando_acao"):
+        modal_relatorio_finalizado(st.session_state["relatorio_aguardando_acao"])
 
     def autosave_parcial():
         """Salva automaticamente o progresso atual (Em Andamento) no banco.
@@ -1796,6 +1870,7 @@ with aba_policial:
             st.error("Erro: O KM Final não pode ser menor que o KM Inicial.")
         else:
             st.session_state["relatorio_enviado"] = True
+            _id_existente_antes = st.session_state["relatorio_id_atual"]
 
             dados_para_salvar = {
                 "status": "Finalizado" if encerrar_servico else "Em Andamento",
@@ -1832,17 +1907,17 @@ with aba_policial:
                 st.error(f"Falha ao salvar no banco Neon: {erro}")
             else:
                 st.session_state["relatorio_id_atual"] = novo_id
+                registrar_auditoria(
+                    novo_id, "servico",
+                    "Edição" if _id_existente_antes else "Criação",
+                    st.session_state.get("usuario_conectado", "")
+                )
                 if encerrar_servico:
-                    st.success(f"✅ Relatório Nº {novo_id:04d} finalizado e gravado com sucesso na nuvem do Pelotão!")
-                    # Serviço concluído: limpa tudo para o próximo relatório começar do zero
-                    st.session_state["relatorio_id_atual"] = None
-                    st.session_state["guarnicao_carregada_key"] = None
-                    st.session_state["patrulhamento_terrestre_list"] = []
-                    st.session_state["patrulhamento_fluvial_list"] = []
-                    st.session_state["capturas_animais_list"] = []
-                    st.session_state["apreensoes_list"] = []
-                    st.session_state["prolepse_list"] = []
-                    st.session_state["armamento_carregado"] = None
+                    # Serviço concluído: NÃO limpa mais aqui — abre o modal e deixa
+                    # os dados na tela até o usuário escolher Imprimir e/ou Concluir.
+                    # Isso corrige o bug de impressão em branco (a limpeza acontecia
+                    # antes de a pessoa conseguir imprimir).
+                    st.session_state["relatorio_aguardando_acao"] = novo_id
                 else:
                     st.success(f"💾 Progresso do dia salvo na nuvem (Nº {novo_id:04d}). Serviço continua em andamento — pode fechar o sistema com segurança e retomar depois.")
                 st.session_state["relatorio_enviado"] = False
