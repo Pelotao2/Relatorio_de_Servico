@@ -2638,6 +2638,115 @@ with aba_adm:
                                     st.session_state["rf_adm_id_atual"] = None
                                     st.rerun()
 
+                    # --- EXPORTAÇÃO EM LOTE: todos os relatórios de um período, num clique ---
+                    st.divider()
+                    with st.expander("📦 Exportação em Lote (Excel / Word consolidado por período)"):
+                        col_exp1, col_exp2 = st.columns(2)
+                        nomes_meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                                       "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+                        with col_exp1:
+                            mes_exportar = st.selectbox(
+                                "Mês", list(range(1, 13)), format_func=lambda m: nomes_meses[m - 1],
+                                index=datetime.now().month - 1, key="exp_mes"
+                            )
+                        with col_exp2:
+                            ano_exportar = st.selectbox(
+                                "Ano", list(range(datetime.now().year - 3, datetime.now().year + 1))[::-1],
+                                key="exp_ano"
+                            )
+
+                        data_ini_exp = datetime(ano_exportar, mes_exportar, 1).date()
+                        if mes_exportar == 12:
+                            data_fim_exp = datetime(ano_exportar, 12, 31).date()
+                        else:
+                            data_fim_exp = (datetime(ano_exportar, mes_exportar + 1, 1) - timedelta(days=1)).date()
+
+                        df_periodo_servico = df_completo_todos_anos[
+                            (df_completo_todos_anos['data_filtro'] >= data_ini_exp) &
+                            (df_completo_todos_anos['data_filtro'] <= data_fim_exp)
+                        ]
+
+                        registros_rf_periodo = []
+                        conn_exp = init_connection()
+                        if conn_exp:
+                            try:
+                                cur_exp = conn_exp.cursor()
+                                cur_exp.execute(
+                                    "SELECT * FROM relatorios_fiscalizacao WHERE data_fiscalizacao >= %s AND data_fiscalizacao <= %s ORDER BY id ASC;",
+                                    (data_ini_exp, data_fim_exp)
+                                )
+                                registros_rf_periodo = cur_exp.fetchall()
+                                cur_exp.close()
+                                conn_exp.close()
+                            except Exception as e_exp:
+                                st.warning(f"Não foi possível carregar os relatórios de fiscalização do período: {e_exp}")
+
+                        st.caption(
+                            f"Período: {data_ini_exp.strftime('%d/%m/%Y')} a {data_fim_exp.strftime('%d/%m/%Y')} — "
+                            f"{len(df_periodo_servico)} relatório(s) de Serviço, {len(registros_rf_periodo)} de Fiscalização."
+                        )
+
+                        col_botao1, col_botao2 = st.columns(2)
+
+                        with col_botao1:
+                            if st.button("📊 Gerar Excel do Período", use_container_width=True, key="btn_gerar_excel"):
+                                try:
+                                    buffer_excel = io.BytesIO()
+                                    with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
+                                        colunas_servico_export = [c for c in [
+                                            "Nº Sequencial do Relatório", "status", "data_filtro", "unidade", "finalidade",
+                                            "comandante", "motorista", "viatura_prefixo", "km_rodado",
+                                            "pessoas_abordadas", "veiculos_abordados", "embarcacoes_abordadas", "autos_infracao"
+                                        ] if c in df_periodo_servico.columns]
+                                        df_periodo_servico[colunas_servico_export].to_excel(writer, sheet_name="Relatórios de Serviço", index=False)
+
+                                        if registros_rf_periodo:
+                                            df_rf_export = pd.DataFrame(registros_rf_periodo)
+                                            df_rf_export.columns = [c.lower() for c in df_rf_export.columns]
+                                            colunas_rf_export = [c for c in [
+                                                "id", "sequencial", "unidade", "data_fiscalizacao", "interessado", "nome_autuado",
+                                                "municipio", "coordenadas", "auto_infracao_nr", "valor_multa_texto"
+                                            ] if c in df_rf_export.columns]
+                                            df_rf_export[colunas_rf_export].to_excel(writer, sheet_name="Relatórios de Fiscalização", index=False)
+                                        else:
+                                            pd.DataFrame().to_excel(writer, sheet_name="Relatórios de Fiscalização", index=False)
+                                    buffer_excel.seek(0)
+                                    st.download_button(
+                                        "⬇️ Baixar Excel", data=buffer_excel,
+                                        file_name=f"relatorios_{ano_exportar}_{mes_exportar:02d}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True, key="download_excel_lote"
+                                    )
+                                except Exception as e_excel:
+                                    st.error(f"Falha ao gerar Excel: {e_excel}. Verifique se `openpyxl` está no requirements.txt.")
+
+                        with col_botao2:
+                            if st.button("📄 Gerar Word Consolidado (Fiscalização)", use_container_width=True, key="btn_gerar_word"):
+                                if not registros_rf_periodo:
+                                    st.info("Não há relatórios de fiscalização nesse período para consolidar.")
+                                else:
+                                    try:
+                                        from docxcompose.composer import Composer
+                                        doc_mestre = Document(gerar_docx_fiscalizacao(dict(registros_rf_periodo[0])))
+                                        composer = Composer(doc_mestre)
+                                        for reg_rf in registros_rf_periodo[1:]:
+                                            sub_doc = Document(gerar_docx_fiscalizacao(dict(reg_rf)))
+                                            composer.append(sub_doc)
+                                        buffer_word = io.BytesIO()
+                                        composer.save(buffer_word)
+                                        buffer_word.seek(0)
+                                        st.download_button(
+                                            "⬇️ Baixar Word Consolidado", data=buffer_word,
+                                            file_name=f"fiscalizacao_consolidado_{ano_exportar}_{mes_exportar:02d}.docx",
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            use_container_width=True, key="download_word_lote"
+                                        )
+                                    except ImportError:
+                                        st.error("Biblioteca `docxcompose` não instalada — adicione `docxcompose` ao requirements.txt e reimplante o app.")
+                                    except Exception as e_word:
+                                        st.error(f"Falha ao gerar o Word consolidado: {e_word}")
+                        st.caption("O Word consolidado hoje reúne apenas os Relatórios de Fiscalização (é o único tipo com gerador de .docx pronto). O de Serviço sai completo na aba Excel.")
+
                     # Abas do Dashboard Administrativo
                     tab_geral, tab_unidades, tab_equipes = st.tabs(["📊 Produção Geral", "🏢 Por Unidade", "🪖 Por Equipes (Efetivo)"])
                     
@@ -2648,6 +2757,43 @@ with aba_adm:
                         m3.metric("Animais Computados", total_animais_capturados)
                         m4.metric("Apreensões", total_apreensoes)
                         m5.metric("Total em Multas", f"R$ {total_multas:,.2f}")
+
+                        # --- Comparação com o mês anterior ---
+                        st.divider()
+                        st.markdown("### 📈 Comparação com o Mês Anterior")
+
+                        hoje_cmp = datetime.now().date()
+                        primeiro_dia_mes_atual = hoje_cmp.replace(day=1)
+                        ultimo_dia_mes_anterior = primeiro_dia_mes_atual - timedelta(days=1)
+                        primeiro_dia_mes_anterior = ultimo_dia_mes_anterior.replace(day=1)
+
+                        def metricas_do_periodo(data_ini, data_fim):
+                            df_p = df_completo_todos_anos[
+                                (df_completo_todos_anos['data_filtro'] >= data_ini) &
+                                (df_completo_todos_anos['data_filtro'] <= data_fim)
+                            ]
+                            df_ap_p = explodir_lista_json(df_p, "apreensoes")
+                            if not df_ap_p.empty:
+                                df_ap_p = df_ap_p[df_ap_p["INFRAÇÃO/CRIME"] != "Não se aplica"]
+                            return {
+                                "abordagens": int(df_p['pessoas_abordadas'].sum()) if 'pessoas_abordadas' in df_p.columns else 0,
+                                "km_rodado": int(df_p['km_rodado'].sum()) if 'km_rodado' in df_p.columns else 0,
+                                "apreensoes": len(df_ap_p) if not df_ap_p.empty else 0,
+                                "multas": float(pd.to_numeric(df_ap_p["VALOR MULTA"], errors='coerce').fillna(0).sum()) if not df_ap_p.empty and "VALOR MULTA" in df_ap_p.columns else 0.0,
+                            }
+
+                        met_atual = metricas_do_periodo(primeiro_dia_mes_atual, hoje_cmp)
+                        met_anterior = metricas_do_periodo(primeiro_dia_mes_anterior, ultimo_dia_mes_anterior)
+
+                        cA, cB, cC, cD = st.columns(4)
+                        cA.metric("Abordagens (mês atual)", met_atual["abordagens"], delta=met_atual["abordagens"] - met_anterior["abordagens"])
+                        cB.metric("KM Rodado (mês atual)", f"{met_atual['km_rodado']} km", delta=met_atual["km_rodado"] - met_anterior["km_rodado"])
+                        cC.metric("Apreensões (mês atual)", met_atual["apreensoes"], delta=met_atual["apreensoes"] - met_anterior["apreensoes"])
+                        cD.metric("Multas (mês atual)", f"R$ {met_atual['multas']:,.2f}", delta=f"R$ {met_atual['multas'] - met_anterior['multas']:,.2f}")
+                        st.caption(
+                            f"Comparando {primeiro_dia_mes_atual.strftime('%d/%m')} até hoje, contra o mesmo intervalo do mês "
+                            f"anterior ({primeiro_dia_mes_anterior.strftime('%d/%m')} a {ultimo_dia_mes_anterior.strftime('%d/%m')})."
+                        )
                         
                         st.divider()
                         st.markdown("### 📋 Sequência Histórica de Relatórios Criados (Numerados)")
@@ -2827,6 +2973,29 @@ with aba_adm:
                                 with col_cmt2:
                                     st.markdown("##### Multas Aplicadas por Comandante (R$)")
                                     st.bar_chart(data=df_comandante_nova, x='Comandante', y='Total Multas (R$)')
+
+                                # --- Evolução mês a mês por comandante (todo o histórico, não só o período filtrado acima) ---
+                                st.divider()
+                                st.markdown("##### 📈 Evolução de Abordagens por Comandante (mês a mês)")
+                                df_terr_hist = explodir_lista_json(df_completo_todos_anos, "patrulhamento_terrestre", {"PESSOAS ABORDADAS": "Pessoas Abordadas"})
+                                df_fluv_hist = explodir_lista_json(df_completo_todos_anos, "patrulhamento_fluvial", {"PESCADORES ABORDADOS": "Pescadores Abordados"})
+
+                                df_meta_hist = df_completo_todos_anos[["Nº Sequencial do Relatório", "comandante", "data_filtro"]].copy()
+                                df_meta_hist["mes_ref"] = pd.to_datetime(df_meta_hist["data_filtro"]).dt.to_period("M").astype(str)
+
+                                def _total_abordagens(nr):
+                                    t = df_terr_hist[df_terr_hist["Nº Relatório"] == nr]["Pessoas Abordadas"].sum() if not df_terr_hist.empty else 0
+                                    f = df_fluv_hist[df_fluv_hist["Nº Relatório"] == nr]["Pescadores Abordados"].sum() if not df_fluv_hist.empty else 0
+                                    return t + f
+
+                                df_meta_hist["abordagens"] = df_meta_hist["Nº Sequencial do Relatório"].apply(_total_abordagens)
+                                df_evolucao_cmt = df_meta_hist.groupby(["mes_ref", "comandante"])["abordagens"].sum().reset_index()
+
+                                if not df_evolucao_cmt.empty and df_evolucao_cmt["mes_ref"].nunique() > 1:
+                                    df_evolucao_pivot = df_evolucao_cmt.pivot(index="mes_ref", columns="comandante", values="abordagens").fillna(0)
+                                    st.line_chart(df_evolucao_pivot)
+                                else:
+                                    st.info("Ainda não há dados de mais de um mês para mostrar a evolução — volte aqui quando tiver relatórios de pelo menos dois meses diferentes.")
                             else:
                                 st.info("Dados de comandantes não encontrados.")
             except Exception as e:
