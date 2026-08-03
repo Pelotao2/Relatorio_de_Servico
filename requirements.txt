@@ -7,3 +7,5 @@ python-docx
 folium
 streamlit-folium
 utm
+openpyxl
+docxcompose
