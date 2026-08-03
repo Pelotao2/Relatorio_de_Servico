@@ -21,6 +21,23 @@ from logica import (
     formatar_numero_fiscalizacao
 )
 
+# Mapa interativo (ponto + área) e conversão de coordenadas UTM — opcionais:
+# se ainda não estiverem no requirements.txt, o app continua funcionando
+# normalmente, só sem o mapa/UTM (mostra um aviso em vez de quebrar).
+try:
+    import folium
+    from streamlit_folium import st_folium
+    from folium.plugins import Draw
+    MAPA_DISPONIVEL = True
+except Exception:
+    MAPA_DISPONIVEL = False
+
+try:
+    import utm as utm_lib
+    UTM_DISPONIVEL = True
+except Exception:
+    UTM_DISPONIVEL = False
+
 def exibir_logo(caminho, width):
     """Mostra uma imagem de logo sem derrubar o app se o arquivo não existir
     no ambiente (ex.: esquecido de subir pro GitHub na nuvem)."""
@@ -290,6 +307,118 @@ def proximo_numero_fiscalizacao(unidade, ano):
         return 1
     finally:
         conn.close()
+
+def dms_para_decimal(graus, minutos, segundos, hemisferio):
+    """Converte Graus/Minutos/Segundos para Graus Decimais (float)."""
+    decimal = graus + minutos / 60 + segundos / 3600
+    if hemisferio in ("S", "W"):
+        decimal = -decimal
+    return decimal
+
+def decimal_para_dms(decimal, eh_latitude=True):
+    """Converte Graus Decimais para uma tupla (graus, minutos, segundos, hemisfério)."""
+    hemisferio = ("N" if decimal >= 0 else "S") if eh_latitude else ("E" if decimal >= 0 else "W")
+    decimal_abs = abs(decimal)
+    graus = int(decimal_abs)
+    resto = (decimal_abs - graus) * 60
+    minutos = int(resto)
+    segundos = (resto - minutos) * 60
+    return graus, minutos, segundos, hemisferio
+
+def campo_geolocalizacao(key_prefix, permitir_area=True):
+    """Campo de localização geográfica com 3 formatos de entrada (Graus Decimais,
+    GMS e UTM) e mapa interativo (marcar ponto clicando e, opcionalmente, desenhar
+    uma área/polígono). Retorna (latitude, longitude, coordenadas_texto, area_geojson).
+    Todos podem vir None/"" se nada foi preenchido ainda."""
+    st.markdown("###### 📍 Localização Geográfica")
+    formato = st.radio(
+        "Formato de entrada das coordenadas",
+        ["Graus Decimais (DD)", "Graus, Minutos e Segundos (GMS)", "UTM"],
+        key=f"{key_prefix}_formato", horizontal=True
+    )
+
+    lat, lon = None, None
+
+    if formato == "Graus Decimais (DD)":
+        col_dd1, col_dd2 = st.columns(2)
+        with col_dd1:
+            lat = st.number_input("Latitude (DD)", value=0.0, format="%.6f", step=0.000001, key=f"{key_prefix}_lat_dd")
+        with col_dd2:
+            lon = st.number_input("Longitude (DD)", value=0.0, format="%.6f", step=0.000001, key=f"{key_prefix}_lon_dd")
+
+    elif formato == "Graus, Minutos e Segundos (GMS)":
+        st.caption("Latitude")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            lat_g = st.number_input("Graus", min_value=0, max_value=90, step=1, key=f"{key_prefix}_lat_g")
+        with c2:
+            lat_m = st.number_input("Minutos", min_value=0, max_value=59, step=1, key=f"{key_prefix}_lat_m")
+        with c3:
+            lat_s = st.number_input("Segundos", min_value=0.0, max_value=59.999, step=0.1, key=f"{key_prefix}_lat_s")
+        with c4:
+            lat_h = st.selectbox("Hemisfério", ["S", "N"], key=f"{key_prefix}_lat_h")
+        st.caption("Longitude")
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            lon_g = st.number_input("Graus", min_value=0, max_value=180, step=1, key=f"{key_prefix}_lon_g")
+        with c6:
+            lon_m = st.number_input("Minutos", min_value=0, max_value=59, step=1, key=f"{key_prefix}_lon_m")
+        with c7:
+            lon_s = st.number_input("Segundos", min_value=0.0, max_value=59.999, step=0.1, key=f"{key_prefix}_lon_s")
+        with c8:
+            lon_h = st.selectbox("Hemisfério", ["W", "E"], key=f"{key_prefix}_lon_h")
+        lat = dms_para_decimal(lat_g, lat_m, lat_s, lat_h)
+        lon = dms_para_decimal(lon_g, lon_m, lon_s, lon_h)
+
+    else:  # UTM
+        if not UTM_DISPONIVEL:
+            st.warning("⚠️ Conversão UTM indisponível neste ambiente — adicione `utm` ao requirements.txt e reimplante o app.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            zona_utm = st.number_input("Zona UTM", min_value=1, max_value=60, value=21, step=1, key=f"{key_prefix}_utm_zona")
+        with c2:
+            hemisferio_utm = st.selectbox("Hemisfério", ["S", "N"], key=f"{key_prefix}_utm_hemisferio")
+        with c3:
+            easting = st.number_input("Easting (E)", value=0.0, format="%.2f", key=f"{key_prefix}_utm_e")
+        with c4:
+            northing = st.number_input("Northing (N)", value=0.0, format="%.2f", key=f"{key_prefix}_utm_n")
+        if UTM_DISPONIVEL and easting and northing:
+            try:
+                lat, lon = utm_lib.to_latlon(easting, northing, int(zona_utm), northern=(hemisferio_utm == "N"))
+            except Exception as e:
+                st.error(f"Coordenada UTM inválida: {e}")
+
+    coordenadas_texto = f"{lat:.6f}, {lon:.6f}" if lat is not None and lon is not None else ""
+    area_geojson = None
+
+    if not MAPA_DISPONIVEL:
+        st.info("🗺️ Mapa indisponível neste ambiente — adicione `folium` e `streamlit-folium` ao requirements.txt e reimplante o app para habilitar o mapa interativo.")
+        return lat, lon, coordenadas_texto, area_geojson
+
+    centro = [lat, lon] if (lat and lon) else [-20.24, -56.38]  # aprox. região de Miranda/MS
+    mapa = folium.Map(location=centro, zoom_start=14 if (lat and lon) else 9)
+    if lat and lon:
+        folium.Marker([lat, lon], tooltip="Local marcado").add_to(mapa)
+    if permitir_area:
+        Draw(
+            export=False,
+            draw_options={"marker": True, "polygon": True, "rectangle": True, "circle": False, "circlemarker": False, "polyline": False},
+            edit_options={"edit": True},
+        ).add_to(mapa)
+    resultado_mapa = st_folium(mapa, height=350, key=f"{key_prefix}_mapa", use_container_width=True)
+
+    if resultado_mapa:
+        clique = resultado_mapa.get("last_clicked")
+        if clique:
+            lat, lon = clique["lat"], clique["lng"]
+            coordenadas_texto = f"{lat:.6f}, {lon:.6f}"
+            st.caption(f"📍 Ponto atualizado pelo clique no mapa: {coordenadas_texto} (o campo de coordenadas acima não se atualiza sozinho — use este valor ao registrar)")
+        desenho = resultado_mapa.get("last_active_drawing")
+        if desenho:
+            area_geojson = json.dumps(desenho, ensure_ascii=False)
+            st.caption("🔷 Área/ponto desenhado no mapa capturado com sucesso.")
+
+    return lat, lon, coordenadas_texto, area_geojson
 
 def registrar_auditoria(relatorio_id, tipo_relatorio, acao, usuario):
     """Grava uma linha no log de auditoria (quem fez o quê e quando).
@@ -1981,7 +2110,9 @@ with aba_fiscalizacao:
         st.session_state["rf_local"] = _reg.get("local_fiscalizacao", "")
         if _reg.get("data_fiscalizacao"):
             st.session_state["rf_data_fiscalizacao"] = _reg.get("data_fiscalizacao")
-        st.session_state["rf_coordenadas"] = _reg.get("coordenadas", "")
+        st.session_state["rf_geo_formato"] = "Graus Decimais (DD)"
+        st.session_state["rf_geo_lat_dd"] = float(_reg.get("latitude") or 0.0)
+        st.session_state["rf_geo_lon_dd"] = float(_reg.get("longitude") or 0.0)
         st.session_state["rf_municipio"] = _reg.get("municipio", "Miranda")
         st.session_state["rf_telefone"] = _reg.get("telefone", "")
         st.session_state["rf_legislacao"] = _reg.get("legislacao", "")
@@ -2074,13 +2205,13 @@ with aba_fiscalizacao:
         )
     with col_rf4:
         data_fiscalizacao_rf = st.date_input("06 - Data", value=datetime.now(), key="rf_data_fiscalizacao")
-    col_rf5, col_rf6, col_rf7 = st.columns(3)
-    with col_rf5:
-        coordenadas_rf = st.text_input("07 - Coord. Geográfica", key="rf_coordenadas")
+    col_rf6, col_rf7 = st.columns(2)
     with col_rf6:
         municipio_rf = st.selectbox("08 - Município", ["Miranda", "Bodoquena", "Anastácio", "Aquidauana", "Corumbá", "Bonito", "Jardim", "Outros"], key="rf_municipio")
     with col_rf7:
         telefone_rf = st.text_input("09 - Telefone", key="rf_telefone")
+
+    lat_rf, lon_rf, coordenadas_rf, area_geojson_rf = campo_geolocalizacao("rf_geo", permitir_area=True)
 
     st.markdown("#### LEGISLAÇÃO APLICÁVEL")
     legislacao_rf = campo_texto_com_voz("10 - Legislação (um artigo por linha)", "rf_legislacao", altura=100)
@@ -2152,6 +2283,7 @@ with aba_fiscalizacao:
             "interessado": interessado_rf, "nome_autuado": nome_autuado_rf, "cpf_cnpj": cpf_cnpj_rf,
             "rg_ie": rg_ie_rf, "endereco": endereco_rf, "local_fiscalizacao": local_rf,
             "data_fiscalizacao": data_fiscalizacao_rf, "coordenadas": coordenadas_rf, "municipio": municipio_rf,
+            "latitude": lat_rf, "longitude": lon_rf, "area_poligono": area_geojson_rf,
             "telefone": telefone_rf, "legislacao": legislacao_rf, "auto_infracao_nr": auto_infracao_nr_rf,
             "laudo_constatacao_nr": laudo_constatacao_nr_rf, "termo_paralisacao_nr": termo_paralisacao_nr_rf,
             "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
