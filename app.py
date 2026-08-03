@@ -398,7 +398,8 @@ def campo_geolocalizacao(key_prefix, permitir_area=True):
     centro = [lat, lon] if (lat and lon) else [-20.24, -56.38]  # aprox. região de Miranda/MS
     mapa = folium.Map(location=centro, zoom_start=14 if (lat and lon) else 9)
     if lat and lon:
-        folium.Marker([lat, lon], tooltip="Local marcado").add_to(mapa)
+        icone_pino = folium.DivIcon(html='<div style="font-size:30px; line-height:30px; transform:translate(-50%,-100%);">📍</div>')
+        folium.Marker([lat, lon], tooltip="Local marcado", icon=icone_pino).add_to(mapa)
     if permitir_area:
         Draw(
             export=False,
