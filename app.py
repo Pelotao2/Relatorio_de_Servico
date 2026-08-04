@@ -150,11 +150,15 @@ st.set_page_config(page_title="Sistema de Produtividade - Pelotão", page_icon="
 st.markdown("""
     <style>
     .print-only-text { display: none; }
+    .ajuda-tela { font-size: 0.85em; color: #888; }
     @media print {
         header[data-testid="stHeader"],
         div[data-testid="stToolbar"],
         section[data-testid="stSidebar"],
         div[data-baseweb="tab-list"],
+        [data-testid="stTabs"] [role="tablist"],
+        .stTabs > div:first-child,
+        [role="tablist"],
         .stButton, .stDownloadButton, #MainMenu, footer {
             display: none !important;
         }
@@ -165,6 +169,16 @@ st.markdown("""
         div[role="dialog"],
         [data-testid="stModal"],
         div[data-baseweb="modal"] {
+            display: none !important;
+        }
+        [data-testid="stAlert"] {
+            display: none !important;
+        }
+        [data-testid="stIconMaterial"],
+        [data-testid="stIcon"] {
+            display: none !important;
+        }
+        .ajuda-tela {
             display: none !important;
         }
         .print-only-text {
@@ -182,6 +196,10 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+def ajuda(texto):
+    """Texto de orientação/ajuda de tela — nunca aparece na impressão
+    (diferente de st.caption, que aparece — use para conteúdo real do relatório)."""
+    st.markdown(f'<div class="ajuda-tela">{texto}</div>', unsafe_allow_html=True)
 # ==========================================
 # CONEXÃO COM O BANCO DE DADOS (NEON PG)
 # ==========================================
@@ -1100,7 +1118,7 @@ with aba_policial:
         with col_logo:
             exibir_logo("logo_pantanal_folhas.png", 70)
         with col_texto_tit:
-            st.markdown("# RELATÓRIO DE SERVIÇO DIÁRIO OFICIAL")
+            st.markdown("# RELATÓRIO DE SERVIÇO DIÁRIO - RSD")
             st.caption(f"Unidade: **{st.session_state['unidade_operacional']}** — Preencha os campos operacionais da guarnição abaixo.")
     with col_tit2:
         if st.session_state["relatorio_id_atual"]:
@@ -1109,7 +1127,7 @@ with aba_policial:
             st.metric("PRÓXIMO Nº (se novo)", f"{proximo_numero:04d}")
 
         with st.popover("🔍 Buscar Relatório", use_container_width=True):
-            st.caption("Busque por Nº do relatório ou nome do comandante — inclui relatórios já concluídos.")
+            ajuda("Busque por Nº do relatório ou nome do comandante — inclui relatórios já concluídos.")
             termo_busca = st.text_input("Buscar", placeholder="Ex: 0005 ou Madson", key="termo_busca_relatorio", label_visibility="collapsed")
             if termo_busca:
                 resultados_busca = buscar_relatorios(st.session_state["unidade_operacional"], termo_busca)
@@ -1117,7 +1135,7 @@ with aba_policial:
                     for reg in resultados_busca:
                         st.markdown(f"**Nº {reg['id']:04d}** — {reg.get('comandante','')} — *{reg.get('status','')}*")
                         if reg.get("status") == "Finalizado":
-                            st.caption("🔒 Relatório finalizado — protegido contra edição. Só o administrador pode liberar.")
+                            ajuda("🔒 Relatório finalizado — protegido contra edição. Só o administrador pode liberar.")
                             senha_desbloqueio = st.text_input(
                                 "Senha do administrador para editar", type="password",
                                 key=f"senha_desbloqueio_{reg['id']}", label_visibility="collapsed",
@@ -1303,7 +1321,7 @@ with aba_policial:
         st.caption(f"🛢️ Última troca de óleo desta viatura: **{ultima_troca_km:.0f} km**")
     with col_oleo2:
         with st.popover("✏️ Editar Troca de Óleo", use_container_width=True):
-            st.caption("Atualize somente quando a troca de óleo desta viatura realmente acontecer.")
+            ajuda("Atualize somente quando a troca de óleo desta viatura realmente acontecer.")
             novo_km_troca = st.number_input("Novo KM da troca de óleo", min_value=0, step=1, value=int(ultima_troca_km), key=f"novo_km_troca_{viatura}")
             if st.button("💾 Salvar", key=f"salvar_troca_{viatura}", use_container_width=True):
                 if salvar_troca_oleo(viatura, novo_km_troca):
@@ -1762,7 +1780,7 @@ with aba_policial:
 
         st.divider()
         st.markdown("#### Documentos Vinculados a Esta Apreensão")
-        st.caption("Use o botão ➕ para registrar mais de um documento do mesmo tipo nesta mesma apreensão.")
+        ajuda("Use o botão ➕ para registrar mais de um documento do mesmo tipo nesta mesma apreensão.")
         col_doc1, col_doc2 = st.columns(2)
         with col_doc1:
             cadg_valores = campo_multiplo("Nº CADG", "cadg_list")
@@ -1950,7 +1968,7 @@ with aba_policial:
 
     # ================= CAUTELA DE ARMAMENTO E MUNIÇÃO =================
     st.markdown("####  Cautela de Armamento e Munição")
-    st.caption("A cautela fica em aberto (visível em todos os relatórios da unidade) até que o material seja devolvido.")
+    ajuda("A cautela fica em aberto (visível em todos os relatórios da unidade) até que o material seja devolvido.")
 
     with st.popover(" Nova Cautela", use_container_width=True):
         st.markdown("**1. Adicione os itens da cautela**")
@@ -2025,7 +2043,7 @@ with aba_policial:
                     st.caption(f"• {item_cau.get('CÓDIGO','')} — {item_cau.get('NOME','')} (Qtd: {item_cau.get('QUANTIDADE','')})")
 
                 with st.popover("📦 Entrega de Materiais", use_container_width=True):
-                    st.caption("Confirme a devolução do material desta cautela.")
+                    ajuda("Confirme a devolução do material desta cautela.")
                     obs_entrega = st.text_area("Observação (opcional)", key=f"obs_entrega_{cautela['id']}")
                     if st.button("✅ Confirmar Entrega", key=f"confirmar_entrega_{cautela['id']}", use_container_width=True):
                         if entregar_cautela(cautela["id"], obs_entrega):
@@ -2034,7 +2052,7 @@ with aba_policial:
                         else:
                             st.error("Falha ao registrar a entrega — sem conexão com o banco.")
 
-        st.caption("💡 Para imprimir uma cautela, use o botão \"IMPRIMIR / SALVAR ABA EM PDF\" no final da página.")
+        ajuda("💡 Para imprimir uma cautela, use o botão \"IMPRIMIR / SALVAR ABA EM PDF\" no final da página.")
 
     st.divider()
 
@@ -2114,13 +2132,18 @@ with aba_policial:
                 st.rerun()
 
     st.divider()
-    st.markdown("### Assinatura do Responsável")
+    _meses_pt = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+                 "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    _data_assinatura_txt = f"Miranda - MS, {data_fim_sel.day:02d} de {_meses_pt[data_fim_sel.month]} de {data_fim_sel.year}."
+    st.markdown(f'<p style="text-align:right; margin:0;">{_data_assinatura_txt}</p>', unsafe_allow_html=True)
+    _numero_rsd = st.session_state['relatorio_id_atual'] if st.session_state["relatorio_id_atual"] else proximo_numero
     st.markdown(f"""
-        <div style="border-top:2px solid #ccc; margin-top:10px; padding-top:20px; text-align:center;">
+        <div style="margin-top:20px; padding-top:10px; text-align:center;">
             <p style="margin-bottom:40px;">____________________________________________</p>
             <p style="margin:0; font-weight:bold; font-size:16px;">{comandante_sel}</p>
             <p style="margin:0;">Matrícula: {matricula_comandante if matricula_comandante else '____________________'}</p>
             <p style="margin:0; color:#888;">Comandante da Guarnição</p>
+            <p style="margin-top:20px; color:#888; font-size:0.85em;">RSD Nº {_numero_rsd:04d}</p>
         </div>
     """, unsafe_allow_html=True)
 
@@ -2129,7 +2152,7 @@ with aba_policial:
     # ainda depende dele — não passa pelo modal de finalização. Para o Relatório de
     # Serviço em si, use o botão "🖨️ Imprimir / Salvar em PDF" que aparece no modal
     # ao clicar em "Encerrar o serviço agora".
-    st.caption("🖨️ Botão de impressão geral (usado principalmente para imprimir cautelas de armamento — o Relatório de Serviço tem seu próprio botão de impressão no modal ao finalizar).")
+    ajuda("🖨️ Botão de impressão geral (usado principalmente para imprimir cautelas de armamento — o Relatório de Serviço tem seu próprio botão de impressão no modal ao finalizar).")
     components.html(
         """
         <button onclick="window.parent.print()" style="width:100%; padding:10px; background-color:#ff4b4b; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold; font-size:15px;">
