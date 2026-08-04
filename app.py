@@ -805,6 +805,16 @@ def salvar_relatorio(colunas_valores: dict, id_existente=None):
         conn.close()
         return None, str(e)
 
+def _normalizar_nome_efetivo(nome, unidade):
+    """Se o nome salvo no relatório não bater mais exatamente com a lista atual
+    do EFETIVO (ex.: o posto de alguém mudou, como o Rafael hoje), acha o nome
+    mais parecido em vez de travar a seleção ou perder o vínculo."""
+    lista = EFETIVO.get(unidade, [])
+    if nome in lista:
+        return nome
+    proximos = difflib.get_close_matches(nome, lista, n=1, cutoff=0.6)
+    return proximos[0] if proximos else (lista[0] if lista else nome)
+
 def carregar_registro_na_sessao(registro_aberto):
     """Carrega todos os dados de um relatório 'Em Andamento' na sessão atual,
     reutilizada tanto pelo painel 'GU Serviço' quanto pela retomada manual."""
@@ -827,8 +837,9 @@ def carregar_registro_na_sessao(registro_aberto):
         st.session_state["data_ini_sel"] = registro_aberto.get("data_inicial")
     if registro_aberto.get("data_final"):
         st.session_state["data_fim_sel"] = registro_aberto.get("data_final")
-    st.session_state["comandante_sel"] = registro_aberto.get("comandante") or ""
-    st.session_state["motorista_sel"] = registro_aberto.get("motorista") or ""
+    _unidade_reg = registro_aberto.get("unidade") or ""
+    st.session_state["comandante_sel"] = _normalizar_nome_efetivo(registro_aberto.get("comandante") or "", _unidade_reg)
+    st.session_state["motorista_sel"] = _normalizar_nome_efetivo(registro_aberto.get("motorista") or "", _unidade_reg)
     try:
         st.session_state["capturas_animais_list"] = json.loads(registro_aberto.get("capturas_animais") or "[]")
     except Exception:
@@ -847,6 +858,11 @@ def carregar_registro_na_sessao(registro_aberto):
         st.session_state["armamento_carregado"] = None
     st.session_state["alteracoes_servico_input"] = registro_aberto.get("alteracoes_servico") or ""
     st.session_state["guarnicao_carregada_key"] = f"{registro_aberto.get('unidade')}|{registro_aberto.get('comandante')}"
+    # Avisa explicitamente que acabamos de carregar um relatório de propósito —
+    # isso impede a proteção "troca de guarnição" (mais abaixo) de disparar por
+    # coincidência de texto (ex.: nome do comandante mudou de posto no efetivo)
+    # e apagar por engano tudo que acabou de ser carregado.
+    st.session_state["_acabou_de_carregar_relatorio"] = True
 
 def montar_dados_parciais(unidade, equipe, finalidade, comandante, motorista, data_ini, data_fim,
                            viatura_p, km_ini):
@@ -1236,7 +1252,11 @@ with aba_policial:
     # zera tudo antes de continuar — impede que um "Salvar" acabe sobrescrevendo
     # (por engano) o relatório de outra equipe/guarnição.
     chave_guarnicao_atual = f"{unidade_sel}|{comandante_sel}"
-    if st.session_state.get("guarnicao_carregada_key") != chave_guarnicao_atual:
+    if st.session_state.pop("_acabou_de_carregar_relatorio", False):
+        # Acabamos de carregar um relatório de propósito (busca, GU em serviço,
+        # ou desbloqueio de admin) — não reseta, só sincroniza a chave.
+        st.session_state["guarnicao_carregada_key"] = chave_guarnicao_atual
+    elif st.session_state.get("guarnicao_carregada_key") != chave_guarnicao_atual:
         st.session_state["relatorio_id_atual"] = None
         st.session_state["patrulhamento_terrestre_list"] = []
         st.session_state["patrulhamento_fluvial_list"] = []
