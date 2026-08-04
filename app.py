@@ -38,6 +38,12 @@ try:
 except Exception:
     UTM_DISPONIVEL = False
 
+try:
+    import pypdf
+    PDF_LEITURA_DISPONIVEL = True
+except Exception:
+    PDF_LEITURA_DISPONIVEL = False
+
 def exibir_logo(caminho, width):
     """Mostra uma imagem de logo sem derrubar o app se o arquivo não existir
     no ambiente (ex.: esquecido de subir pro GitHub na nuvem)."""
@@ -444,6 +450,131 @@ def campo_geolocalizacao(key_prefix, permitir_area=True):
             st.caption("🔷 Área/ponto desenhado no mapa capturado com sucesso.")
 
     return lat, lon, coordenadas_texto, area_geojson
+
+MESES_PT_PARA_NUM = {
+    "janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4, "maio": 5, "junho": 6,
+    "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
+}
+
+def parse_data_pt(texto_data):
+    """Converte algo como '17 de julho de 2026' para um objeto date. Retorna
+    None se não conseguir reconhecer o padrão (o usuário preenche na mão)."""
+    m = re.search(r"(\d{1,2})\s*de\s*([a-zçãé]+)\s*de\s*(\d{4})", texto_data, re.IGNORECASE)
+    if not m:
+        return None
+    dia, mes_nome, ano = m.groups()
+    mes_num = MESES_PT_PARA_NUM.get(mes_nome.lower().strip())
+    if not mes_num:
+        return None
+    try:
+        return datetime(int(ano), mes_num, int(dia)).date()
+    except Exception:
+        return None
+
+def extrair_texto_pdf(arquivo_pdf):
+    """Extrai todo o texto de um PDF nativo (com texto selecionável). Não faz
+    OCR — se o PDF for escaneado/foto, o texto sai vazio ou incompleto."""
+    leitor = pypdf.PdfReader(arquivo_pdf)
+    texto_completo = ""
+    for pagina in leitor.pages:
+        texto_completo += (pagina.extract_text() or "") + "\n"
+    return texto_completo
+
+def extrair_dados_ordem_operacao(texto):
+    """Tenta sugerir número, vigência, finalidade resumida e instruções de
+    CADG/Kobotoolbox a partir do texto da Ordem de Operação. Qualquer campo não
+    encontrado volta vazio/None — a pessoa preenche/confirma na tela, nunca é
+    salvo sem revisão humana."""
+    sugestao = {"numero": "", "data_inicio": None, "data_fim": None, "finalidade": "", "cadg_kobo": ""}
+
+    m_num = re.search(r"ORDEM DE OPERA[ÇC][ÃA]O\s*N[ºo°]?\s*([^\n]+)", texto, re.IGNORECASE)
+    if m_num:
+        sugestao["numero"] = m_num.group(1).strip()
+
+    m_ini = re.search(r"Data de In[ií]cio\s*:?\s*([^\n]+)", texto, re.IGNORECASE)
+    if m_ini:
+        sugestao["data_inicio"] = parse_data_pt(m_ini.group(1))
+
+    m_fim = re.search(r"Data\s*(?:de\s*)?T[ée]rmino\s*:?\s*([^\n]+)", texto, re.IGNORECASE)
+    if m_fim:
+        sugestao["data_fim"] = parse_data_pt(m_fim.group(1))
+
+    m_final = re.search(r"1\.\s*FINALIDADE\s*(.*?)(?:2\.\s*OBJETIVO|$)", texto, re.IGNORECASE | re.DOTALL)
+    if m_final:
+        sugestao["finalidade"] = re.sub(r"\s+", " ", m_final.group(1)).strip()[:600]
+
+    m_presc = re.search(r"11\.\s*PRESCRI[ÇC][ÕO]ES DIVERSAS\s*(.*)", texto, re.IGNORECASE | re.DOTALL)
+    if m_presc:
+        sugestao["cadg_kobo"] = re.sub(r"\s+", " ", m_presc.group(1)).strip()[:2000]
+
+    return sugestao
+
+def montar_texto_ordem_servico(ordem):
+    """Monta o texto final da Ordem de Serviço a partir dos dados confirmados
+    da Ordem de Operação."""
+    finalidade = ordem.get("finalidade") or "[finalidade não especificada]"
+    texto = f"Em atendimento à Ordem de Operação {ordem.get('numero','')}, a equipe deverá realizar {finalidade}. "
+    texto += "Ao final, a equipe deverá registrar o fato no CADG citando a Ordem em vigor"
+    if ordem.get("cadg_kobo"):
+        texto += f", observando ainda: {ordem['cadg_kobo']}"
+    else:
+        texto += " e também deverá lançar os dados no KoboToolbox."
+    return texto
+
+def salvar_ordem_operacao(dados, usuario):
+    conn = init_connection()
+    if not conn:
+        return None, "Sem conexão com o banco."
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO ordens_operacao
+               (numero, data_inicio, data_fim, finalidade, cadg_kobo, status, criado_por, data_criacao)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
+            (dados["numero"], dados["data_inicio"], dados["data_fim"], dados["finalidade"],
+             dados["cadg_kobo"], "Vigente", usuario, datetime.now())
+        )
+        novo_id = cur.fetchone()["id"]
+        conn.commit()
+        cur.close()
+        conn.close()
+        registrar_auditoria(novo_id, "ordem_operacao", "Criação", usuario)
+        return novo_id, None
+    except Exception as e:
+        conn.close()
+        return None, str(e)
+
+def listar_ordens_operacao():
+    conn = init_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM ordens_operacao ORDER BY data_inicio DESC;")
+        registros = cur.fetchall()
+        cur.close()
+        conn.close()
+        return registros
+    except Exception:
+        return []
+
+def encerrar_ordem_manualmente(id_ordem, usuario):
+    conn = init_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE ordens_operacao SET status = %s, encerrada_manualmente_em = %s, encerrada_por = %s WHERE id = %s;",
+            ("Encerrada Manualmente", datetime.now(), usuario, id_ordem)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        registrar_auditoria(id_ordem, "ordem_operacao", "Encerramento Manual", usuario)
+        return True
+    except Exception:
+        return False
 
 def registrar_auditoria(relatorio_id, tipo_relatorio, acao, usuario):
     """Grava uma linha no log de auditoria (quem fez o quê e quando).
@@ -875,6 +1006,8 @@ def carregar_registro_na_sessao(registro_aberto):
     except Exception:
         st.session_state["armamento_carregado"] = None
     st.session_state["alteracoes_servico_input"] = registro_aberto.get("alteracoes_servico") or ""
+    _ordens_citadas_str = registro_aberto.get("ordens_servico_citadas") or ""
+    st.session_state["ordens_citadas_sel"] = [v.strip() for v in _ordens_citadas_str.split(";") if v.strip()]
     st.session_state["guarnicao_carregada_key"] = f"{registro_aberto.get('unidade')}|{registro_aberto.get('comandante')}"
     # Avisa explicitamente que acabamos de carregar um relatório de propósito —
     # isso impede a proteção "troca de guarnição" (mais abaixo) de disparar por
@@ -1105,7 +1238,106 @@ def campo_multiplo(label, session_key, placeholder_prefix=None):
     return [v.strip() for v in st.session_state[session_key] if v.strip() != ""]
 
 # Criando as abas principais na interface do usuário
-aba_policial, aba_fiscalizacao, aba_adm = st.tabs(["Formulário de Serviço", "📋 Relatório de Fiscalização", "Painel Estratégico (Adm)"])
+aba_policial, aba_fiscalizacao, aba_ordens, aba_adm = st.tabs(
+    ["Formulário de Serviço", "📋 Relatório de Fiscalização", "📑 Ordens de Operação", "Painel Estratégico (Adm)"]
+)
+
+# ------------------------------------------
+# VISÃO 3: ORDENS DE OPERAÇÃO → ORDENS DE SERVIÇO
+# ------------------------------------------
+with aba_ordens:
+    st.markdown("# 📑 ORDENS DE OPERAÇÃO E ORDENS DE SERVIÇO")
+    st.caption("Anexe o PDF da CI/Ordem de Operação do Batalhão. O sistema sugere os campos — você confere e confirma antes de salvar.")
+
+    if not PDF_LEITURA_DISPONIVEL:
+        st.warning("⚠️ Leitura de PDF indisponível neste ambiente — adicione `pypdf` ao requirements.txt e reimplante o app. Você ainda pode cadastrar a Ordem preenchendo os campos manualmente abaixo.")
+
+    if "sugestao_ordem" not in st.session_state:
+        st.session_state["sugestao_ordem"] = None
+
+    arquivo_ordem_pdf = st.file_uploader("Anexar PDF da CI / Ordem de Operação", type=["pdf"], key="upload_ordem_pdf")
+    if arquivo_ordem_pdf is not None and PDF_LEITURA_DISPONIVEL:
+        if st.button("🔎 Ler PDF e Sugerir Campos", use_container_width=True):
+            try:
+                texto_extraido = extrair_texto_pdf(arquivo_ordem_pdf)
+                st.session_state["sugestao_ordem"] = extrair_dados_ordem_operacao(texto_extraido)
+                if not any(st.session_state["sugestao_ordem"].values()):
+                    st.warning("Não consegui identificar nenhum campo automaticamente — talvez o PDF tenha um formato diferente do modelo que vimos. Preencha manualmente abaixo.")
+                else:
+                    st.success("Sugestão gerada — confira e ajuste os campos abaixo antes de confirmar.")
+            except Exception as e:
+                st.error(f"Não consegui ler esse PDF: {e}")
+
+    sugestao = st.session_state.get("sugestao_ordem") or {"numero": "", "data_inicio": None, "data_fim": None, "finalidade": "", "cadg_kobo": ""}
+
+    st.markdown("### Confirme os dados da Ordem")
+    col_ord1, col_ord2, col_ord3 = st.columns(3)
+    with col_ord1:
+        numero_ordem = st.text_input("Número da Ordem de Operação", value=sugestao.get("numero") or "", key="ordem_numero_input")
+    with col_ord2:
+        data_inicio_ordem = st.date_input("Data de Início", value=sugestao.get("data_inicio") or datetime.now().date(), key="ordem_data_inicio_input")
+    with col_ord3:
+        data_fim_ordem = st.date_input("Data Término", value=sugestao.get("data_fim") or datetime.now().date(), key="ordem_data_fim_input")
+
+    finalidade_ordem = st.text_area(
+        "A equipe deverá realizar... (resumo da finalidade — confira/edite o que o PDF sugeriu)",
+        value=sugestao.get("finalidade") or "", height=100, key="ordem_finalidade_input"
+    )
+    cadg_kobo_ordem = st.text_area(
+        "Instruções de CADG / KoboToolbox específicas desta Ordem (opcional — se vazio, usa o texto padrão)",
+        value=sugestao.get("cadg_kobo") or "", height=100, key="ordem_cadg_kobo_input"
+    )
+
+    if numero_ordem and finalidade_ordem:
+        st.markdown("##### 📄 Prévia da Ordem de Serviço gerada")
+        _preview_ordem = {"numero": numero_ordem, "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem}
+        st.info(montar_texto_ordem_servico(_preview_ordem))
+
+    if st.button("✅ Confirmar e Criar Ordem de Serviço", type="primary", use_container_width=True):
+        if not numero_ordem or not finalidade_ordem:
+            st.error("Preencha ao menos o número da Ordem e a finalidade antes de confirmar.")
+        else:
+            dados_ordem = {
+                "numero": numero_ordem, "data_inicio": data_inicio_ordem, "data_fim": data_fim_ordem,
+                "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem
+            }
+            novo_id_ordem, erro_ordem = salvar_ordem_operacao(dados_ordem, st.session_state.get("usuario_conectado", ""))
+            if erro_ordem:
+                st.error(f"Falha ao salvar: {erro_ordem}")
+            else:
+                st.success(f"✅ Ordem de Serviço criada a partir da Operação {numero_ordem}!")
+                st.session_state["sugestao_ordem"] = None
+                time.sleep(1)
+                st.rerun()
+
+    st.divider()
+    st.markdown("### Ordens de Operação Cadastradas")
+    todas_ordens = listar_ordens_operacao()
+    hoje_ordens = datetime.now().date()
+    if not todas_ordens:
+        st.info("Nenhuma Ordem de Operação cadastrada ainda.")
+    for ordem in todas_ordens:
+        _vencida = ordem.get("data_fim") and ordem["data_fim"] < hoje_ordens
+        _encerrada_manual = ordem.get("status") == "Encerrada Manualmente"
+        if _encerrada_manual:
+            _cor, _status_txt = "#888", f"🔒 Encerrada manualmente por {ordem.get('encerrada_por','')}"
+        elif _vencida:
+            _cor, _status_txt = "#ff4b4b", "🔴 Vencida (data final já passou)"
+        else:
+            _cor, _status_txt = "#2ecc71", "🟢 Vigente"
+
+        with st.container(border=True):
+            col_o1, col_o2 = st.columns([5, 1])
+            with col_o1:
+                st.markdown(f"**{ordem.get('numero','')}** — {ordem.get('data_inicio','')} a {ordem.get('data_fim','')}")
+                st.markdown(f"<span style='color:{_cor}; font-weight:bold;'>{_status_txt}</span>", unsafe_allow_html=True)
+                with st.expander("Ver Ordem de Serviço completa"):
+                    st.write(montar_texto_ordem_servico(ordem))
+            with col_o2:
+                if not _encerrada_manual and not _vencida:
+                    if st.button("🔒 Encerrar Antecipadamente", key=f"encerrar_ordem_{ordem['id']}", use_container_width=True):
+                        encerrar_ordem_manualmente(ordem["id"], st.session_state.get("usuario_conectado", ""))
+                        st.rerun()
 
 # ------------------------------------------
 # VISÃO 1: FORMULÁRIO DE SERVIÇO (POLICIAL)
@@ -1200,6 +1432,17 @@ with aba_policial:
         data_ini_sel = st.date_input("Data Inicial do Serviço", value=datetime.now(), key="data_ini_sel")
     with col_u3:
         data_fim_sel = st.date_input("Data Final do Serviço (Jornada 5 dias)", value=data_ini_sel + timedelta(days=5), key="data_fim_sel")
+
+    _ordens_disponiveis = [
+        o for o in listar_ordens_operacao()
+        if o.get("status") == "Vigente" and o.get("data_fim") and o["data_fim"] >= datetime.now().date()
+    ]
+    _opcoes_ordens_sel = [o["numero"] for o in _ordens_disponiveis]
+    ordens_citadas_sel = st.multiselect(
+        "📑 Ordem(ns) de Serviço vigente(s) aplicável(is) a este relatório",
+        options=_opcoes_ordens_sel, key="ordens_citadas_sel",
+        help="Vem da aba 'Ordens de Operação'. Se a Operação que você precisa não aparece aqui, cadastre-a primeiro naquela aba."
+    )
 
     st.markdown("#### Guarnição de Serviço")
 
@@ -2105,6 +2348,7 @@ with aba_policial:
                 "patrulhamento_fluvial": json.dumps(st.session_state["patrulhamento_fluvial_list"], ensure_ascii=False),
                 "armamento_municao": json.dumps(tabela_armamento, ensure_ascii=False) if 'tabela_armamento' in locals() else "[]",
                 "alteracoes_servico": alteracoes_servico,
+                "ordens_servico_citadas": "; ".join(ordens_citadas_sel),
             }
 
             novo_id, erro = salvar_relatorio(dados_para_salvar, st.session_state["relatorio_id_atual"])
