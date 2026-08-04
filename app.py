@@ -895,7 +895,7 @@ EFETIVO = {
         "Subtenente PM Luiz Carlos Cavalieri Silva",
         "1º Sargento PM João Vaz",
         "1º Sargento PM Ronaldo da Silva",
-        "2º Sargento PM Rafael Bucinsky Fontes",
+        "1º Sargento PM Rafael Bucinsky Fontes",
         "3º Sargento PM Augusto Graça",
         "3º Sargento PM Macsuel Vilalba Santana",
         "Cabo PM Edmar Falcão Santana"
@@ -916,7 +916,7 @@ MATRICULAS = {
     "Subtenente PM Luiz Carlos Cavalieri Silva": "53859021",
     "1º Sargento PM João Vaz": "31702021",
     "1º Sargento PM Ronaldo da Silva": "92954021",
-    "2º Sargento PM Rafael Bucinsky Fontes": "95943021",
+    "1º Sargento PM Rafael Bucinsky Fontes": "95943021",
     "3º Sargento PM Augusto Graça": "45808021",
     "3º Sargento PM Macsuel Vilalba Santana": "117436021",
     "3º Sargento PM Madson Acosta Flores": "25849021",
@@ -925,6 +925,27 @@ MATRICULAS = {
     "3º Sargento PM Diego Aguilera Romeiro": "31260021",
     "Cabo PM Luiz Henrique da Silva Ferreira": "426855021",
     "Cabo PM Thiago David Mareco de Souza": "425383021"
+}
+
+# Nome de guerra de cada policial — usado para nomear a equipe automaticamente
+# como "Equipe <Nome de Guerra do Comandante>", no padrão militar (GU é do
+# comandante). ⚠️ "3º Sargento PM Augusto Graça" não veio na lista que você
+# passou — usei "Graça" como um palpite temporário; me avise o nome de guerra
+# certo dele para eu corrigir.
+NOME_GUERRA = {
+    "1º Tenente PM Gesner Batista Ramos": "1º Ten PM Batista",
+    "Subtenente PM Luiz Carlos Cavalieri Silva": "ST PM Luiz Carlos",
+    "1º Sargento PM João Vaz": "1º Sgt PM João Vaz",
+    "1º Sargento PM Ronaldo da Silva": "1º Sgt PM Ronaldo",
+    "1º Sargento PM Rafael Bucinsky Fontes": "1º Sgt PM Rafael",
+    "3º Sargento PM Augusto Graça": "3º Sgt PM Graça",  # ⚠️ palpite — confirmar nome de guerra
+    "3º Sargento PM Macsuel Vilalba Santana": "3º Sgt PM Macsuel",
+    "Cabo PM Edmar Falcão Santana": "Cb PM Falcão",
+    "3º Sargento PM Luiz Alberto Antonieto": "3º Sgt PM Antonieto",
+    "3º Sargento PM Madson Acosta Flores": "3º Sgt PM Madson",
+    "3º Sargento PM Diego Aguilera Romeiro": "3º Sgt PM Diego",
+    "Cabo PM Luiz Henrique da Silva Ferreira": "Cb PM Luiz Henrique",
+    "Cabo PM Thiago David Mareco de Souza": "Cb PM Mareco"
 }
 
 # Placas/prefixos de todas as viaturas e embarcações da unidade.
@@ -1127,8 +1148,9 @@ with aba_policial:
 
     st.markdown("### 01 - DADOS DE CONTROLE")
     
-    # Define a equipe de forma oculta nos bastidores para não quebrar a tabela do banco de dados
-    equipe_sel = "Equipe Única"
+    # A equipe agora é derivada automaticamente do Comandante escolhido logo
+    # abaixo (padrão militar: a guarnição é do comandante) — ver equipe_sel
+    # calculado após a seleção do Comandante da Guarnição.
     
     # Grid de 3 colunas com a data inicial movida para o centro conforme a indicação
     col_u1, col_u2, col_u3 = st.columns(3)
@@ -1162,6 +1184,7 @@ with aba_policial:
     col_g1, col_g2, col_g3 = st.columns(3)
     with col_g1:
         comandante_sel = st.selectbox("Comandante da Guarnição", EFETIVO[unidade_sel], key="comandante_sel")
+    equipe_sel = f"Equipe {NOME_GUERRA.get(comandante_sel, comandante_sel)}"
     with col_g2:
         motorista_sel = st.selectbox("Motorista / Tripulante", EFETIVO[unidade_sel], key="motorista_sel")
     with col_g3:
@@ -2163,11 +2186,25 @@ with aba_fiscalizacao:
                 for reg in resultados_rf:
                     col_r1, col_r2 = st.columns([5, 1])
                     with col_r1:
-                        st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')})")
-                    with col_r2:
-                        if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
-                            st.session_state["carregar_edicao_rf"] = reg
-                            st.rerun()
+                        st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')}) — *{reg.get('status','Finalizado')}*")
+                    if reg.get("status") == "Finalizado":
+                        senha_desbloqueio_rf = st.text_input(
+                            "Senha do administrador para editar", type="password",
+                            key=f"senha_desbloqueio_rf_{reg['id']}", label_visibility="collapsed",
+                            placeholder="Senha do administrador para editar este relatório"
+                        )
+                        if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_rf_{reg['id']}", use_container_width=True):
+                            if senha_desbloqueio_rf == USUARIOS_PERMITIDOS.get("admin"):
+                                st.session_state["carregar_edicao_rf"] = reg
+                                registrar_auditoria(reg['id'], "fiscalizacao", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
+                                st.rerun()
+                            else:
+                                st.error("Senha de administrador incorreta. Edição não liberada.")
+                    else:
+                        with col_r2:
+                            if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
+                                st.session_state["carregar_edicao_rf"] = reg
+                                st.rerun()
             else:
                 st.info("Nenhum relatório encontrado.")
 
@@ -2295,7 +2332,40 @@ with aba_fiscalizacao:
     st.caption(f"Matrícula: {matricula_relator_rf or '— não cadastrada —'}")
     cargo_relator_rf = st.text_input("Cargo/Função", value=st.session_state.get("rf_cargo_relator", "Cmt. da GU Ambiental/Relator"), key="rf_cargo_relator")
 
-    if st.button("💾 Salvar Relatório de Fiscalização", type="primary", use_container_width=True):
+    @st.dialog("Relatório de Fiscalização Salvo")
+    def modal_rf_finalizado(id_relatorio, numero_relatorio):
+        st.success(f"✅ Relatório {numero_relatorio} finalizado e gravado com sucesso na nuvem do Pelotão!")
+        st.caption("Os dados continuam na tela até você clicar em Concluir — pode imprimir quantas vezes precisar antes disso.")
+
+        if st.session_state.get("_disparar_impressao_rf"):
+            components.html("<script>window.parent.print();</script>", height=0)
+            st.session_state["_disparar_impressao_rf"] = False
+
+        col_rfm1, col_rfm2 = st.columns(2)
+        with col_rfm1:
+            if st.button("🖨️ Imprimir / Salvar em PDF", use_container_width=True, key="rf_modal_imprimir"):
+                registrar_auditoria(id_relatorio, "fiscalizacao", "Impressão", st.session_state.get("usuario_conectado", ""))
+                st.session_state["_disparar_impressao_rf"] = True
+                st.rerun()
+        with col_rfm2:
+            if st.button("✅ Concluir e Iniciar Novo Relatório", type="primary", use_container_width=True, key="rf_modal_concluir"):
+                for _k in list(st.session_state.keys()):
+                    if _k.startswith("rf_") and _k not in ("rf_geo_formato",):
+                        del st.session_state[_k]
+                st.session_state["relatorio_rf_aguardando_acao"] = None
+                st.rerun()
+
+    if st.session_state.get("relatorio_rf_aguardando_acao"):
+        _dados_modal_rf = st.session_state["relatorio_rf_aguardando_acao"]
+        modal_rf_finalizado(_dados_modal_rf["id"], _dados_modal_rf["numero"])
+
+    col_salvar_rf1, col_salvar_rf2 = st.columns(2)
+    with col_salvar_rf1:
+        salvar_rascunho_rf = st.button("💾 Salvar Rascunho (continuar depois)", use_container_width=True)
+    with col_salvar_rf2:
+        finalizar_rf = st.button("✅ Finalizar Relatório de Fiscalização", type="primary", use_container_width=True)
+
+    if salvar_rascunho_rf or finalizar_rf:
         dados_rf = {
             "interessado": interessado_rf, "nome_autuado": nome_autuado_rf, "cpf_cnpj": cpf_cnpj_rf,
             "rg_ie": rg_ie_rf, "endereco": endereco_rf, "local_fiscalizacao": local_rf,
@@ -2309,7 +2379,7 @@ with aba_fiscalizacao:
             "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
             "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
             "relator": relator_rf, "matricula_relator": matricula_relator_rf, "cargo_relator": cargo_relator_rf,
-            "status": "Finalizado"
+            "status": "Finalizado" if finalizar_rf else "Em Andamento"
         }
         if not st.session_state["rf_id_atual"]:
             ano_rf = data_fiscalizacao_rf.year
@@ -2330,7 +2400,12 @@ with aba_fiscalizacao:
             st.session_state["rf_id_atual"] = novo_id_rf
             if not st.session_state.get("rf_numero_atual"):
                 st.session_state["rf_numero_atual"] = dados_rf.get("numero")
-            st.success(f"✅ Relatório Nº {st.session_state['rf_numero_atual']} salvo com sucesso!")
+
+            if finalizar_rf:
+                st.session_state["relatorio_rf_aguardando_acao"] = {"id": novo_id_rf, "numero": st.session_state["rf_numero_atual"]}
+                st.rerun()
+            else:
+                st.success(f"💾 Rascunho salvo (Nº {st.session_state['rf_numero_atual']}). Pode fechar o sistema com segurança — os dados já estão na nuvem, use a busca acima para retomar depois.")
 
             dados_rf["numero"] = st.session_state["rf_numero_atual"]
             buffer_docx = gerar_docx_fiscalizacao(dados_rf)
@@ -2805,7 +2880,9 @@ with aba_adm:
                         cA.metric("Abordagens (mês atual)", met_atual["abordagens"], delta=met_atual["abordagens"] - met_anterior["abordagens"])
                         cB.metric("KM Rodado (mês atual)", f"{met_atual['km_rodado']} km", delta=met_atual["km_rodado"] - met_anterior["km_rodado"])
                         cC.metric("Apreensões (mês atual)", met_atual["apreensoes"], delta=met_atual["apreensoes"] - met_anterior["apreensoes"])
-                        cD.metric("Multas (mês atual)", f"R$ {met_atual['multas']:,.2f}", delta=f"R$ {met_atual['multas'] - met_anterior['multas']:,.2f}")
+                        _delta_multas = met_atual['multas'] - met_anterior['multas']
+                        _delta_multas_txt = f"{'-' if _delta_multas < 0 else '+'}R$ {abs(_delta_multas):,.2f}"
+                        cD.metric("Multas (mês atual)", f"R$ {met_atual['multas']:,.2f}", delta=_delta_multas_txt)
                         st.caption(
                             f"Comparando {primeiro_dia_mes_atual.strftime('%d/%m')} até hoje, contra o mesmo intervalo do mês "
                             f"anterior ({primeiro_dia_mes_anterior.strftime('%d/%m')} a {ultimo_dia_mes_anterior.strftime('%d/%m')})."
