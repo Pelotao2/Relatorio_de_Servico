@@ -1870,7 +1870,7 @@ with aba_policial:
     with st.container(border=True):
         col_t1, col_t2, col_t3 = st.columns(3)
         with col_t1:
-            sol_t = st.selectbox("Solicitante", ["Ministério Público", "1ºBPMA", "Imasul", "Outros"], key="sol_t_input")
+            sol_t = st.selectbox("Solicitante", ["Comandante do Pelotão", "Ministério Público", "1ºBPMA", "Imasul", "Outros"], key="sol_t_input")
             pessoas_t = st.number_input("Qtd Pessoas Abordadas", min_value=0, step=1, key="pessoas_t_input")
             vistorias_t = st.number_input("Qtd Vistorias", min_value=0, step=1, key="vistorias_t_input")
             cadg_t = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_t_input")
@@ -2034,7 +2034,7 @@ with aba_policial:
     with st.container(border=True):
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
-            sol_f = st.selectbox("Solicitante", ["Ministério Público", "1ºBPMA", "Imasul", "Outros"], key="sol_f_input")
+            sol_f = st.selectbox("Solicitante", ["Comandnte do Pelotão", "Ministério Público", "1ºBPMA", "Imasul", "Outros"], key="sol_f_input")
             pescadores_f = st.number_input("Qtd Pescadores Abordados", min_value=0, step=1, key="pescadores_f_input")
             vistorias_f = st.number_input("Qtd Vistorias (Fluvial)", min_value=0, step=1, key="vistorias_f_input")
         with col_f2:
@@ -2633,6 +2633,8 @@ with aba_fiscalizacao:
         "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)",
         "Ministério Público Estadual (MPE)",
         "CPAmb/1ºBPMA"
+        "Comandante do 2ºPPMA de Miranda"
+        "Comandante do 2ºGPM Barra do Aquidauana"
     ]
     if "rf_interessado_multi" not in st.session_state:
         st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
