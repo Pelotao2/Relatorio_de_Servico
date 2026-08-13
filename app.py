@@ -2632,8 +2632,8 @@ with aba_fiscalizacao:
     lista_interessados_padrao = [
         "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)",
         "Ministério Público Estadual (MPE)",
-        "CPAmb/1ºBPMA"
-        "Comandante do 2ºPPMA de Miranda"
+        "CPAmb/1ºBPMA",
+        "Comandante do 2ºPPMA de Miranda",
         "Comandante do 2ºGPM Barra do Aquidauana"
     ]
     if "rf_interessado_multi" not in st.session_state:
