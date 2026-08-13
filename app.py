@@ -558,12 +558,13 @@ def salvar_ordem_operacao(dados, usuario):
         return None, "Sem conexão com o banco."
     try:
         cur = conn.cursor()
+        _pdf_bytes = psycopg2.Binary(dados["arquivo_pdf"]) if dados.get("arquivo_pdf") else None
         cur.execute(
             """INSERT INTO ordens_operacao
-               (numero, data_inicio, data_fim, finalidade, cadg_kobo, status, criado_por, data_criacao)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
+               (numero, data_inicio, data_fim, finalidade, cadg_kobo, status, criado_por, data_criacao, arquivo_pdf, arquivo_pdf_nome)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
             (dados["numero"], dados["data_inicio"], dados["data_fim"], dados["finalidade"],
-             dados["cadg_kobo"], "Vigente", usuario, datetime.now())
+             dados["cadg_kobo"], "Vigente", usuario, datetime.now(), _pdf_bytes, dados.get("arquivo_pdf_nome"))
         )
         novo_id = cur.fetchone()["id"]
         conn.commit()
@@ -1334,19 +1335,21 @@ with aba_ordens:
     with col_ord3:
         data_fim_ordem = st.date_input("Data Término", value=sugestao.get("data_fim") or datetime.now().date(), key="ordem_data_fim_input")
 
+    def _altura_dinamica(texto, minimo=100, maximo=500):
+        """Estima uma altura de caixa de texto proporcional ao conteúdo (o
+        Streamlit não tem 'altura automática' nativa, então aproximamos pela
+        quantidade de caracteres/linhas)."""
+        linhas_estimadas = max(1, len(texto or "") // 90) + (texto or "").count("\n") + 2
+        return int(min(maximo, max(minimo, 24 * linhas_estimadas)))
+
     finalidade_ordem = st.text_area(
         "A equipe deverá realizar... (resumo da finalidade — confira/edite o que o PDF sugeriu)",
-        value=sugestao.get("finalidade") or "", height=100, key="ordem_finalidade_input"
+        value=sugestao.get("finalidade") or "", height=_altura_dinamica(sugestao.get("finalidade")), key="ordem_finalidade_input"
     )
     cadg_kobo_ordem = st.text_area(
         "Instruções de CADG / KoboToolbox específicas desta Ordem (opcional — se vazio, usa o texto padrão)",
-        value=sugestao.get("cadg_kobo") or "", height=100, key="ordem_cadg_kobo_input"
+        value=sugestao.get("cadg_kobo") or "", height=_altura_dinamica(sugestao.get("cadg_kobo")), key="ordem_cadg_kobo_input"
     )
-
-    if numero_ordem and finalidade_ordem:
-        st.markdown("##### 📄 Prévia da Ordem de Serviço gerada")
-        _preview_ordem = {"numero": numero_ordem, "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem}
-        st.info(montar_texto_ordem_servico(_preview_ordem))
 
     if st.button("✅ Confirmar e Criar Ordem de Serviço", type="primary", use_container_width=True):
         if not numero_ordem or not finalidade_ordem:
@@ -1354,7 +1357,9 @@ with aba_ordens:
         else:
             dados_ordem = {
                 "numero": numero_ordem, "data_inicio": data_inicio_ordem, "data_fim": data_fim_ordem,
-                "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem
+                "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem,
+                "arquivo_pdf": arquivo_ordem_pdf.getvalue() if arquivo_ordem_pdf is not None else None,
+                "arquivo_pdf_nome": arquivo_ordem_pdf.name if arquivo_ordem_pdf is not None else None,
             }
             novo_id_ordem, erro_ordem = salvar_ordem_operacao(dados_ordem, st.session_state.get("usuario_conectado", ""))
             if erro_ordem:
@@ -1362,10 +1367,10 @@ with aba_ordens:
             else:
                 st.success(f"✅ Ordem de Serviço criada a partir da Operação {numero_ordem}!")
                 st.session_state["sugestao_ordem"] = None
-                for _k in ("ordem_numero_input", "ordem_finalidade_input", "ordem_cadg_kobo_input"):
-                    st.session_state[_k] = ""
-                st.session_state["ordem_data_inicio_input"] = datetime.now().date()
-                st.session_state["ordem_data_fim_input"] = datetime.now().date()
+                for _k in ("ordem_numero_input", "ordem_finalidade_input", "ordem_cadg_kobo_input",
+                           "ordem_data_inicio_input", "ordem_data_fim_input"):
+                    if _k in st.session_state:
+                        del st.session_state[_k]
                 time.sleep(1)
                 st.rerun()
 
@@ -1393,6 +1398,12 @@ with aba_ordens:
                 with st.expander("Ver Ordem de Serviço completa"):
                     st.write(montar_texto_ordem_servico(ordem))
             with col_o2:
+                if ordem.get("arquivo_pdf"):
+                    st.download_button(
+                        "📄 PDF Original", data=bytes(ordem["arquivo_pdf"]),
+                        file_name=ordem.get("arquivo_pdf_nome") or f"Ordem_{ordem.get('numero','')}.pdf",
+                        mime="application/pdf", key=f"baixar_pdf_ordem_{ordem['id']}", use_container_width=True
+                    )
                 if not _encerrada_manual and not _vencida:
                     if st.button("🔒 Encerrar Antecipadamente", key=f"encerrar_ordem_{ordem['id']}", use_container_width=True):
                         encerrar_ordem_manualmente(ordem["id"], st.session_state.get("usuario_conectado", ""))
