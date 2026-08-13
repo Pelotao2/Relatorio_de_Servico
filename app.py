@@ -164,6 +164,7 @@ st.markdown("""
     <style>
     .print-only-text { display: none; }
     .ajuda-tela { font-size: 0.85em; color: #888; }
+    .nao-imprime { }
     @media print {
         header[data-testid="stHeader"],
         div[data-testid="stToolbar"],
@@ -192,6 +193,9 @@ st.markdown("""
             display: none !important;
         }
         .ajuda-tela {
+            display: none !important;
+        }
+        .nao-imprime {
             display: none !important;
         }
         .print-only-text {
@@ -1397,6 +1401,33 @@ with aba_ordens:
                 st.markdown(f"<span style='color:{_cor}; font-weight:bold;'>{_status_txt}</span>", unsafe_allow_html=True)
                 with st.expander("Ver Ordem de Serviço completa"):
                     st.write(montar_texto_ordem_servico(ordem))
+                with st.expander("📊 Ver Estatísticas desta Operação"):
+                    _conn_stats = init_connection()
+                    if _conn_stats:
+                        try:
+                            _cur_stats = _conn_stats.cursor()
+                            _cur_stats.execute(
+                                "SELECT * FROM relatorios_servico WHERE ordens_servico_citadas ILIKE %s;",
+                                (f"%{ordem['numero']}%",)
+                            )
+                            _regs_stats = _cur_stats.fetchall()
+                            _cur_stats.close()
+                            _conn_stats.close()
+                            if _regs_stats:
+                                _total_abordagens = sum((r.get("pessoas_abordadas") or 0) for r in _regs_stats)
+                                _total_km = sum((r.get("km_final") or 0) - (r.get("km_inicial") or 0) for r in _regs_stats)
+                                _total_autos = sum((r.get("autos_infracao") or 0) for r in _regs_stats)
+                                _total_embarc = sum((r.get("embarcacoes_abordadas") or 0) for r in _regs_stats)
+                                cs1, cs2, cs3, cs4, cs5 = st.columns(5)
+                                cs1.metric("Relatórios", len(_regs_stats))
+                                cs2.metric("Abordagens", _total_abordagens)
+                                cs3.metric("KM Rodado", f"{_total_km} km")
+                                cs4.metric("Embarcações", _total_embarc)
+                                cs5.metric("Autos de Infração", _total_autos)
+                            else:
+                                st.info("Nenhum relatório de serviço citou essa Ordem ainda.")
+                        except Exception as e:
+                            st.error(f"Erro ao calcular estatísticas: {e}")
             with col_o2:
                 if ordem.get("arquivo_pdf"):
                     st.download_button(
@@ -1479,6 +1510,24 @@ with aba_policial:
                         st.rerun()
     else:
         st.success(f"🚔 GU em serviço — Nº {st.session_state['relatorio_id_atual']:04d} — Dia em andamento.")
+
+    _ordens_vigentes_banner = [
+        o for o in listar_ordens_operacao()
+        if o.get("status") == "Vigente" and o.get("data_fim") and o["data_fim"] >= datetime.now().date()
+    ]
+    if _ordens_vigentes_banner:
+        _numeros_banner = ", ".join(o["numero"] for o in _ordens_vigentes_banner)
+        st.markdown(
+            f'<div class="nao-imprime" style="background:#e8f5e9; border:1px solid #a5d6a7; border-radius:6px; padding:10px 14px; margin-bottom:10px;">'
+            f'📑 <b>Ordem(ns) de Operação vigente(s):</b> {_numeros_banner} — veja em "Ordens de Operação"</div>',
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            '<div class="nao-imprime" style="background:#fff3e0; border:1px solid #ffcc80; border-radius:6px; padding:10px 14px; margin-bottom:10px;">'
+            '⚠️ <b>Nenhuma Ordem de Operação vigente cadastrada</b> — confira na aba "Ordens de Operação"</div>',
+            unsafe_allow_html=True
+        )
 
     st.divider()
 
