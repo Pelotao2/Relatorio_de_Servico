@@ -44,6 +44,13 @@ try:
 except Exception:
     PDF_LEITURA_DISPONIVEL = False
 
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_DISPONIVEL = True
+except Exception:
+    OCR_DISPONIVEL = False
+
 def exibir_logo(caminho, width):
     """Mostra uma imagem de logo sem derrubar o app se o arquivo não existir
     no ambiente (ex.: esquecido de subir pro GitHub na nuvem)."""
@@ -472,13 +479,37 @@ def parse_data_pt(texto_data):
         return None
 
 def extrair_texto_pdf(arquivo_pdf):
-    """Extrai todo o texto de um PDF nativo (com texto selecionável). Não faz
-    OCR — se o PDF for escaneado/foto, o texto sai vazio ou incompleto."""
+    """Extrai o texto de um PDF. Primeiro tenta o caminho rápido (texto nativo,
+    selecionável). Se vier vazio/quase vazio — comum em documentos assinados
+    digitalmente pelo gov.br, que costumam 'achatar' cada página em uma imagem —
+    cai automaticamente para OCR (reconhecimento de texto na imagem da página)."""
     leitor = pypdf.PdfReader(arquivo_pdf)
     texto_completo = ""
     for pagina in leitor.pages:
         texto_completo += (pagina.extract_text() or "") + "\n"
-    return texto_completo
+
+    if len(texto_completo.strip()) >= 50:
+        return texto_completo, "texto"
+
+    if not OCR_DISPONIVEL:
+        return texto_completo, "texto"
+
+    # Fallback: OCR. Precisa reler o arquivo do início (pypdf já consumiu o ponteiro).
+    arquivo_pdf.seek(0)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(arquivo_pdf.read())
+        caminho_tmp = tmp.name
+    try:
+        paginas_imagem = convert_from_path(caminho_tmp, dpi=200)
+        texto_ocr = ""
+        for imagem_pagina in paginas_imagem:
+            texto_ocr += pytesseract.image_to_string(imagem_pagina, lang="por") + "\n"
+        return texto_ocr, "ocr"
+    finally:
+        try:
+            os.remove(caminho_tmp)
+        except Exception:
+            pass
 
 def extrair_dados_ordem_operacao(texto):
     """Tenta sugerir número, vigência, finalidade resumida e instruções de
@@ -1259,8 +1290,11 @@ with aba_ordens:
     if arquivo_ordem_pdf is not None and PDF_LEITURA_DISPONIVEL:
         if st.button("🔎 Ler PDF e Sugerir Campos", use_container_width=True):
             try:
-                texto_extraido = extrair_texto_pdf(arquivo_ordem_pdf)
+                with st.spinner("Lendo o PDF... (se for documento assinado digitalmente, pode levar alguns segundos a mais por usar OCR)"):
+                    texto_extraido, metodo_leitura = extrair_texto_pdf(arquivo_ordem_pdf)
                 st.session_state["sugestao_ordem"] = extrair_dados_ordem_operacao(texto_extraido)
+                if metodo_leitura == "ocr":
+                    st.caption("📸 Esse PDF não tinha texto selecionável (comum em documentos assinados digitalmente pelo gov.br) — usei reconhecimento de texto na imagem da página.")
                 if not any(st.session_state["sugestao_ordem"].values()):
                     st.warning("Não consegui identificar nenhum campo automaticamente — talvez o PDF tenha um formato diferente do modelo que vimos. Preencha manualmente abaixo.")
                 else:
@@ -1667,7 +1701,7 @@ with aba_policial:
             tipo_animal = st.selectbox("Animal Capturado", ["Não se aplica", "Silvestre", "Doméstico"], key="tipo_animal")
             quantidade_animal = st.number_input("Quantidade de Animais", min_value=0, step=1, key="qtd_animal")
         with col_anim2:
-            lista_especies = ["Não se aplica", "Tamanduá", "Lobo - Guará", "Lobinho", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Cobra", "Morcego", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
+            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
             especie_animal = st.selectbox("Espécie do Animal", lista_especies, key="especie_animal")
             cadg_animal = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_animal_input")
         with col_anim3:
