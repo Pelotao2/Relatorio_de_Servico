@@ -1292,15 +1292,36 @@ with aba_ordens:
             try:
                 with st.spinner("Lendo o PDF... (se for documento assinado digitalmente, pode levar alguns segundos a mais por usar OCR)"):
                     texto_extraido, metodo_leitura = extrair_texto_pdf(arquivo_ordem_pdf)
-                st.session_state["sugestao_ordem"] = extrair_dados_ordem_operacao(texto_extraido)
-                if metodo_leitura == "ocr":
-                    st.caption("📸 Esse PDF não tinha texto selecionável (comum em documentos assinados digitalmente pelo gov.br) — usei reconhecimento de texto na imagem da página.")
-                if not any(st.session_state["sugestao_ordem"].values()):
-                    st.warning("Não consegui identificar nenhum campo automaticamente — talvez o PDF tenha um formato diferente do modelo que vimos. Preencha manualmente abaixo.")
+                sugestao_nova = extrair_dados_ordem_operacao(texto_extraido)
+                st.session_state["sugestao_ordem"] = sugestao_nova
+
+                # Empurra a sugestão direto para as chaves dos widgets abaixo —
+                # só usar "value=" não basta aqui, porque essas chaves já existem
+                # no session_state desde o primeiro carregamento da tela, e nesse
+                # caso o Streamlit ignora "value=" e mantém o que já estava salvo.
+                st.session_state["ordem_numero_input"] = sugestao_nova.get("numero") or ""
+                if sugestao_nova.get("data_inicio"):
+                    st.session_state["ordem_data_inicio_input"] = sugestao_nova["data_inicio"]
+                if sugestao_nova.get("data_fim"):
+                    st.session_state["ordem_data_fim_input"] = sugestao_nova["data_fim"]
+                st.session_state["ordem_finalidade_input"] = sugestao_nova.get("finalidade") or ""
+                st.session_state["ordem_cadg_kobo_input"] = sugestao_nova.get("cadg_kobo") or ""
+
+                if not any(sugestao_nova.values()):
+                    st.session_state["_msg_leitura_ordem"] = ("warning", "Não consegui identificar nenhum campo automaticamente — talvez o PDF tenha um formato diferente do modelo que vimos. Preencha manualmente abaixo.")
                 else:
-                    st.success("Sugestão gerada — confira e ajuste os campos abaixo antes de confirmar.")
+                    _msg = "Sugestão gerada — confira e ajuste os campos abaixo antes de confirmar."
+                    if metodo_leitura == "ocr":
+                        _msg = "📸 PDF sem texto selecionável (comum em documento assinado digitalmente) — usei OCR. " + _msg
+                    st.session_state["_msg_leitura_ordem"] = ("success", _msg)
+                st.rerun()
             except Exception as e:
                 st.error(f"Não consegui ler esse PDF: {e}")
+
+    if st.session_state.get("_msg_leitura_ordem"):
+        _tipo_msg, _texto_msg = st.session_state.pop("_msg_leitura_ordem")
+        getattr(st, _tipo_msg)(_texto_msg)
+
 
     sugestao = st.session_state.get("sugestao_ordem") or {"numero": "", "data_inicio": None, "data_fim": None, "finalidade": "", "cadg_kobo": ""}
 
@@ -1341,6 +1362,10 @@ with aba_ordens:
             else:
                 st.success(f"✅ Ordem de Serviço criada a partir da Operação {numero_ordem}!")
                 st.session_state["sugestao_ordem"] = None
+                for _k in ("ordem_numero_input", "ordem_finalidade_input", "ordem_cadg_kobo_input"):
+                    st.session_state[_k] = ""
+                st.session_state["ordem_data_inicio_input"] = datetime.now().date()
+                st.session_state["ordem_data_fim_input"] = datetime.now().date()
                 time.sleep(1)
                 st.rerun()
 
