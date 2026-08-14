@@ -594,6 +594,72 @@ def listar_ordens_operacao():
     except Exception:
         return []
 
+def mesclar_relatorios_servico(id_origem, id_destino, usuario):
+    """Move toda a produção registrada no relatório id_origem (atividades,
+    apreensões, capturas, prolepse, armamento) para dentro do relatório
+    id_destino — somando às listas que já existirem lá — e apaga o relatório
+    de origem. Usado quando alguém cria uma Guarnição por engano em vez de
+    continuar a que já estava em andamento (ex.: caso do Sgt Rafael)."""
+    if id_origem == id_destino:
+        return False, "Origem e destino não podem ser o mesmo relatório."
+    conn = init_connection()
+    if not conn:
+        return False, "Sem conexão com o banco."
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM relatorios_servico WHERE id = %s;", (id_origem,))
+        origem = cur.fetchone()
+        cur.execute("SELECT * FROM relatorios_servico WHERE id = %s;", (id_destino,))
+        destino = cur.fetchone()
+        if not origem or not destino:
+            cur.close()
+            conn.close()
+            return False, "Relatório de origem ou destino não encontrado — confira os números."
+
+        def _merge_lista(campo):
+            lista_o = json.loads(origem.get(campo) or "[]")
+            lista_d = json.loads(destino.get(campo) or "[]")
+            return lista_d + lista_o
+
+        terrestre = _merge_lista("patrulhamento_terrestre")
+        fluvial = _merge_lista("patrulhamento_fluvial")
+        capturas = _merge_lista("capturas_animais")
+        apreensoes = _merge_lista("apreensoes")
+        prolepse = _merge_lista("visitas_prolepse")
+        armamento_o = json.loads(origem.get("armamento_municao") or "[]")
+        armamento_d = json.loads(destino.get("armamento_municao") or "[]")
+        armamento = armamento_d if armamento_d else armamento_o
+
+        pessoas_abordadas = sum(item.get("PESSOAS ABORDADAS", 0) for item in terrestre)
+        veiculos_abordados = sum(item.get("VEÍCULOS ABORDADOS", 0) for item in terrestre)
+        embarcacoes_abordadas = sum(item.get("EMBARCAÇÕES ABORDADAS", 0) for item in fluvial)
+        autos_infracao = sum(len([v for v in ap.get("AUTO INFRAÇÃO", "").split("; ") if v.strip()]) for ap in apreensoes)
+
+        km_final_novo = origem.get("km_final") or destino.get("km_final")
+
+        cur.execute(
+            """UPDATE relatorios_servico SET
+                patrulhamento_terrestre = %s, patrulhamento_fluvial = %s,
+                capturas_animais = %s, apreensoes = %s, visitas_prolepse = %s,
+                armamento_municao = %s, pessoas_abordadas = %s, veiculos_abordados = %s,
+                embarcacoes_abordadas = %s, autos_infracao = %s, km_final = %s
+               WHERE id = %s;""",
+            (json.dumps(terrestre, ensure_ascii=False), json.dumps(fluvial, ensure_ascii=False),
+             json.dumps(capturas, ensure_ascii=False), json.dumps(apreensoes, ensure_ascii=False),
+             json.dumps(prolepse, ensure_ascii=False), json.dumps(armamento, ensure_ascii=False),
+             pessoas_abordadas, veiculos_abordados, embarcacoes_abordadas, autos_infracao,
+             km_final_novo, id_destino)
+        )
+        cur.execute("DELETE FROM relatorios_servico WHERE id = %s;", (id_origem,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        registrar_auditoria(id_destino, "servico", f"Mesclagem — recebeu produção do relatório Nº {id_origem:04d} (excluído em seguida)", usuario)
+        return True, None
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
 def encerrar_ordem_manualmente(id_ordem, usuario):
     conn = init_connection()
     if not conn:
@@ -1741,7 +1807,15 @@ with aba_policial:
 
     def autosave_parcial():
         """Salva automaticamente o progresso atual (Em Andamento) no banco.
-        Usado ao inserir, editar ou excluir qualquer item das listas 03/04/05."""
+        Usado ao inserir, editar ou excluir qualquer item das listas 03/04/05.
+        TRAVA: se a guarnição ainda não foi assumida (botão do bloco 02), recusa
+        salvar — isso evita que alguém preencha atividades sem perceber que
+        está criando um relatório novo, em vez de continuar o serviço já
+        escalado (foi exatamente isso que causou a Guarnição duplicada do
+        Sgt Rafael). O item digitado não se perde: fica na lista em memória e
+        salva normalmente assim que a guarnição for assumida."""
+        if st.session_state["relatorio_id_atual"] is None:
+            return "⚠️ A Guarnição de serviço ainda não foi salva. Role até o item 02 e clique em '💾 Salvar Guarnição / Assumir Serviço' antes de continuar — senão isso pode criar um relatório duplicado."
         _dados_auto = montar_dados_parciais(
             unidade_sel, equipe_sel, finalidade_sel, comandante_sel, motorista_sel,
             data_ini_sel, data_fim_sel, viatura, km_inicial
@@ -1765,6 +1839,9 @@ with aba_policial:
             st.rerun()
 
     st.divider()
+
+    if st.session_state["relatorio_id_atual"] is None:
+        st.warning("⚠️ **A Guarnição de serviço ainda não foi salva.** Preencha o item 02 acima e clique em '💾 Salvar Guarnição / Assumir Serviço' antes de registrar atividades — assim o sistema sabe que você está continuando o serviço da sua equipe, e não começando um relatório novo por engano.")
 
     # Bloco 03: Captura de Animais
     st.markdown("### 03 - CAPTURA DE ANIMAIS (PANTANAL)")
@@ -2837,7 +2914,7 @@ with aba_adm:
         if conn:
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT * FROM relatorios_servico ORDER BY id ASC;")
+                cur.execute("SELECT * FROM relatorios_servico ORDER BY id DESC;")
                 registros = cur.fetchall()
                 cur.close()
                 conn.close()
@@ -3136,6 +3213,40 @@ with aba_adm:
                                     st.success(f"✅ Alterações salvas — registrado como editado por {st.session_state.get('usuario_conectado','')}.")
                                     st.session_state["rf_adm_id_atual"] = None
                                     st.rerun()
+
+                    # --- CORRIGIR GUARNIÇÃO DUPLICADA (mesclar produção e excluir o relatório errado) ---
+                    st.divider()
+                    with st.expander("🔀 Corrigir Guarnição Duplicada (mesclar produção e excluir)"):
+                        st.caption(
+                            "Use quando alguém criar um relatório novo por engano em vez de continuar o serviço já em "
+                            "andamento (ex.: comandante esqueceu de clicar em 'GU Serviço' e começou do zero). "
+                            "Isso move toda a produção do relatório ERRADO para dentro do relatório CORRETO, "
+                            "soma às atividades que já existirem lá, e apaga o relatório errado. Não tem como desfazer."
+                        )
+                        col_merge1, col_merge2 = st.columns(2)
+                        with col_merge1:
+                            id_origem_merge = st.number_input("Nº do relatório ERRADO (será apagado)", min_value=1, step=1, key="merge_id_origem")
+                        with col_merge2:
+                            id_destino_merge = st.number_input("Nº do relatório CORRETO (vai receber a produção)", min_value=1, step=1, key="merge_id_destino")
+
+                        senha_merge = st.text_input("Senha do administrador", type="password", key="merge_senha_admin")
+                        confirmar_merge = st.checkbox(f"Confirmo: apagar o Nº {int(id_origem_merge):04d} e mover tudo para o Nº {int(id_destino_merge):04d}", key="merge_confirmar")
+
+                        if st.button("🔀 Mesclar e Excluir", type="primary", use_container_width=True, key="btn_executar_merge"):
+                            if senha_merge != USUARIOS_PERMITIDOS.get("admin"):
+                                st.error("Senha de administrador incorreta.")
+                            elif not confirmar_merge:
+                                st.error("Marque a confirmação antes de executar — essa ação não pode ser desfeita.")
+                            else:
+                                _ok_merge, _erro_merge = mesclar_relatorios_servico(
+                                    int(id_origem_merge), int(id_destino_merge), st.session_state.get("usuario_conectado", "")
+                                )
+                                if _ok_merge:
+                                    st.success(f"✅ Produção do Nº {int(id_origem_merge):04d} movida para o Nº {int(id_destino_merge):04d}, e o relatório errado foi excluído.")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(f"Falha ao mesclar: {_erro_merge}")
 
                     # --- EXPORTAÇÃO EM LOTE: todos os relatórios de um período, num clique ---
                     st.divider()
