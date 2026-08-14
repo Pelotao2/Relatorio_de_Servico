@@ -1863,7 +1863,7 @@ with aba_policial:
             tipo_animal = st.selectbox("Animal Capturado", ["Não se aplica", "Silvestre", "Doméstico"], key="tipo_animal")
             quantidade_animal = st.number_input("Quantidade de Animais", min_value=0, step=1, key="qtd_animal")
         with col_anim2:
-            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
+            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Cobra", "Sucuri", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
             especie_animal = st.selectbox("Espécie do Animal", lista_especies, key="especie_animal")
             cadg_animal = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_animal_input")
         with col_anim3:
