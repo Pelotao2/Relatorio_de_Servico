@@ -1167,7 +1167,8 @@ EFETIVO = {
         "1º Sargento PM Rafael Bucinsky Fontes",
         "3º Sargento PM Augusto Graça",
         "3º Sargento PM Macsuel Vilalba Santana",
-        "Cabo PM Edmar Falcão Santana"
+        "Cabo PM Edmar Falcão Santana",
+        "Cabo PM Marus Viniciús Cristaldo Barbosa"
     ],
     "GPM Barra": [
         "3º Sargento PM Luiz Alberto Antonieto",
