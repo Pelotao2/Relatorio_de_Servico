@@ -563,12 +563,15 @@ def salvar_ordem_operacao(dados, usuario):
     try:
         cur = conn.cursor()
         _pdf_bytes = psycopg2.Binary(dados["arquivo_pdf"]) if dados.get("arquivo_pdf") else None
+        _modelo_bytes = psycopg2.Binary(dados["arquivo_modelo_relatorio"]) if dados.get("arquivo_modelo_relatorio") else None
         cur.execute(
             """INSERT INTO ordens_operacao
-               (numero, data_inicio, data_fim, finalidade, cadg_kobo, status, criado_por, data_criacao, arquivo_pdf, arquivo_pdf_nome)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
+               (numero, data_inicio, data_fim, finalidade, cadg_kobo, status, criado_por, data_criacao,
+                arquivo_pdf, arquivo_pdf_nome, arquivo_modelo_relatorio, arquivo_modelo_relatorio_nome, quando_usar_relatorio)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
             (dados["numero"], dados["data_inicio"], dados["data_fim"], dados["finalidade"],
-             dados["cadg_kobo"], "Vigente", usuario, datetime.now(), _pdf_bytes, dados.get("arquivo_pdf_nome"))
+             dados["cadg_kobo"], "Vigente", usuario, datetime.now(), _pdf_bytes, dados.get("arquivo_pdf_nome"),
+             _modelo_bytes, dados.get("arquivo_modelo_relatorio_nome"), dados.get("quando_usar_relatorio"))
         )
         novo_id = cur.fetchone()["id"]
         conn.commit()
@@ -1167,8 +1170,7 @@ EFETIVO = {
         "1º Sargento PM Rafael Bucinsky Fontes",
         "3º Sargento PM Augusto Graça",
         "3º Sargento PM Macsuel Vilalba Santana",
-        "Cabo PM Edmar Falcão Santana",
-        "Cabo PM Marus Viniciús Cristaldo Barbosa"
+        "Cabo PM Edmar Falcão Santana"
     ],
     "GPM Barra": [
         "3º Sargento PM Luiz Alberto Antonieto",
@@ -1422,6 +1424,21 @@ with aba_ordens:
         value=sugestao.get("cadg_kobo") or "", height=_altura_dinamica(sugestao.get("cadg_kobo")), key="ordem_cadg_kobo_input"
     )
 
+    st.markdown("###### 📎 Modelo de Relatório (opcional)")
+    st.caption(
+        "Algumas Ordens exigem um relatório específico só em determinado caso (ex.: relatório de vistoria só quando "
+        "há CAQ apontando queimada, não em toda visita preventiva). Anexe o modelo aqui e explique abaixo quando usá-lo — "
+        "isso vai aparecer pro efetivo junto com o aviso de Ordem vigente, em vez do sistema tentar gerar esse relatório sozinho."
+    )
+    arquivo_modelo_relatorio = st.file_uploader(
+        "Anexar modelo de relatório (.docx ou .pdf)", type=["docx", "pdf"], key="upload_modelo_relatorio_input"
+    )
+    quando_usar_relatorio_ordem = st.text_area(
+        "Observação: quando usar esse relatório",
+        placeholder='Ex.: "Usar somente quando houver CAQ (Comunicado de Alerta de Queimada) — não usar em visita preventiva de rotina."',
+        key="ordem_quando_usar_relatorio_input", height=80
+    )
+
     if st.button("✅ Confirmar e Criar Ordem de Serviço", type="primary", use_container_width=True):
         if not numero_ordem or not finalidade_ordem:
             st.error("Preencha ao menos o número da Ordem e a finalidade antes de confirmar.")
@@ -1431,6 +1448,9 @@ with aba_ordens:
                 "finalidade": finalidade_ordem, "cadg_kobo": cadg_kobo_ordem,
                 "arquivo_pdf": arquivo_ordem_pdf.getvalue() if arquivo_ordem_pdf is not None else None,
                 "arquivo_pdf_nome": arquivo_ordem_pdf.name if arquivo_ordem_pdf is not None else None,
+                "arquivo_modelo_relatorio": arquivo_modelo_relatorio.getvalue() if arquivo_modelo_relatorio is not None else None,
+                "arquivo_modelo_relatorio_nome": arquivo_modelo_relatorio.name if arquivo_modelo_relatorio is not None else None,
+                "quando_usar_relatorio": quando_usar_relatorio_ordem,
             }
             novo_id_ordem, erro_ordem = salvar_ordem_operacao(dados_ordem, st.session_state.get("usuario_conectado", ""))
             if erro_ordem:
@@ -1466,6 +1486,12 @@ with aba_ordens:
             with col_o1:
                 st.markdown(f"**{ordem.get('numero','')}** — {ordem.get('data_inicio','')} a {ordem.get('data_fim','')}")
                 st.markdown(f"<span style='color:{_cor}; font-weight:bold;'>{_status_txt}</span>", unsafe_allow_html=True)
+                if ordem.get("arquivo_modelo_relatorio") and ordem.get("quando_usar_relatorio"):
+                    st.markdown(
+                        f'<div style="background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:8px 12px; margin-top:6px; font-size:0.9em;">'
+                        f'📄 <b>Modelo de Relatório em Anexo</b> — quando usar: {html.escape(ordem["quando_usar_relatorio"])}</div>',
+                        unsafe_allow_html=True
+                    )
                 with st.expander("Ver Ordem de Serviço completa"):
                     st.write(montar_texto_ordem_servico(ordem))
                 with st.expander("📊 Ver Estatísticas desta Operação"):
@@ -1501,6 +1527,14 @@ with aba_ordens:
                         "📄 PDF Original", data=bytes(ordem["arquivo_pdf"]),
                         file_name=ordem.get("arquivo_pdf_nome") or f"Ordem_{ordem.get('numero','')}.pdf",
                         mime="application/pdf", key=f"baixar_pdf_ordem_{ordem['id']}", use_container_width=True
+                    )
+                if ordem.get("arquivo_modelo_relatorio"):
+                    _nome_modelo = ordem.get("arquivo_modelo_relatorio_nome") or f"Modelo_{ordem.get('numero','')}.docx"
+                    _mime_modelo = "application/pdf" if _nome_modelo.lower().endswith(".pdf") else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    st.download_button(
+                        "📎 Modelo Relatório", data=bytes(ordem["arquivo_modelo_relatorio"]),
+                        file_name=_nome_modelo, mime=_mime_modelo,
+                        key=f"baixar_modelo_ordem_{ordem['id']}", use_container_width=True
                     )
                 if not _encerrada_manual and not _vencida:
                     if st.button("🔒 Encerrar Antecipadamente", key=f"encerrar_ordem_{ordem['id']}", use_container_width=True):
@@ -1589,6 +1623,13 @@ with aba_policial:
             f'📑 <b>Ordem(ns) de Operação vigente(s):</b> {_numeros_banner} — veja em "Ordens de Operação"</div>',
             unsafe_allow_html=True
         )
+        _ordens_com_modelo = [o for o in _ordens_vigentes_banner if o.get("arquivo_modelo_relatorio")]
+        for _o_modelo in _ordens_com_modelo:
+            st.markdown(
+                f'<div class="nao-imprime" style="background:#e3f2fd; border:1px solid #90caf9; border-radius:6px; padding:8px 12px; margin-bottom:10px; font-size:0.9em;">'
+                f'📄 <b>Modelo de Relatório em Anexo</b> ({_o_modelo["numero"]}) — {html.escape(_o_modelo.get("quando_usar_relatorio") or "confira na aba Ordens de Operação quando usar")}</div>',
+                unsafe_allow_html=True
+            )
     else:
         st.markdown(
             '<div class="nao-imprime" style="background:#fff3e0; border:1px solid #ffcc80; border-radius:6px; padding:10px 14px; margin-bottom:10px;">'
@@ -1864,7 +1905,7 @@ with aba_policial:
             tipo_animal = st.selectbox("Animal Capturado", ["Não se aplica", "Silvestre", "Doméstico"], key="tipo_animal")
             quantidade_animal = st.number_input("Quantidade de Animais", min_value=0, step=1, key="qtd_animal")
         with col_anim2:
-            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Cobra", "Sucuri", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
+            lista_especies = ["Não se aplica", "Tamanduá", "Quati", "Jacaré", "Onça Pintada", "Onça Parda", "Anta", "Tatu", "Periquito", "seriema", "Tucano", "Papagaio","cachorro", "Gato", "Cavalo", "gado", "Cabra", "Carneiro", "Gavião", "Jaguatirica", "Teiú", "Outro"]
             especie_animal = st.selectbox("Espécie do Animal", lista_especies, key="especie_animal")
             cadg_animal = st.text_input("Nº CADG", placeholder="Ex: 12345", key="cadg_animal_input")
         with col_anim3:
@@ -2315,7 +2356,8 @@ with aba_policial:
     total_dist_f = sum(item["DISTÂNCIA"] for item in st.session_state["patrulhamento_fluvial_list"])
     total_apre_f = sum(item["APREENSÕES"] for item in st.session_state["patrulhamento_fluvial_list"])
     total_vist_f = sum(item["VISTORIAS"] for item in st.session_state["patrulhamento_fluvial_list"])
-    total_prolepse = len(st.session_state.get("prolepse_list", []))
+    total_prolepse = sum(1 for item in st.session_state["patrulhamento_terrestre_list"] if item["FINALIDADE"] == "Prolepse") + \
+                      sum(1 for item in st.session_state["patrulhamento_fluvial_list"] if item["FINALIDADE"] == "Prolepse")
     total_veiculos_t = sum(item.get("VEÍCULOS ABORDADOS", 0) for item in st.session_state["patrulhamento_terrestre_list"])
 
     total_ai = 0
