@@ -2356,8 +2356,7 @@ with aba_policial:
     total_dist_f = sum(item["DISTÂNCIA"] for item in st.session_state["patrulhamento_fluvial_list"])
     total_apre_f = sum(item["APREENSÕES"] for item in st.session_state["patrulhamento_fluvial_list"])
     total_vist_f = sum(item["VISTORIAS"] for item in st.session_state["patrulhamento_fluvial_list"])
-    total_prolepse = sum(1 for item in st.session_state["patrulhamento_terrestre_list"] if item["FINALIDADE"] == "Prolepse") + \
-                      sum(1 for item in st.session_state["patrulhamento_fluvial_list"] if item["FINALIDADE"] == "Prolepse")
+    total_prolepse = len(st.session_state.get("prolepse_list", []))
     total_veiculos_t = sum(item.get("VEÍCULOS ABORDADOS", 0) for item in st.session_state["patrulhamento_terrestre_list"])
 
     total_ai = 0
