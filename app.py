@@ -941,9 +941,7 @@ def gerar_docx_fiscalizacao(dados):
 
     doc.add_paragraph()
     p1 = doc.add_paragraph()
-    p1.add_run("1. DOS FATOS").bold = True
-    p2 = doc.add_paragraph()
-    p2.add_run("1. HISTÓRICO").bold = True
+    p1.add_run("1.1 - DO HISTÓRICO").bold = True
     doc.add_paragraph(dados.get("fatos_historico", ""))
 
     try:
@@ -960,11 +958,39 @@ def gerar_docx_fiscalizacao(dados):
             pass
 
     p3 = doc.add_paragraph()
-    p3.add_run("2. DO VALOR DA MULTA:").bold = True
+    p3.add_run("1.2 - DO VALOR DA MULTA:").bold = True
     doc.add_paragraph(dados.get("valor_multa_texto", ""))
 
+    p_tad = doc.add_paragraph()
+    p_tad.add_run("1.3 - DO MATERIAL APREENDIDO:").bold = True
+    try:
+        material_tad = json.loads(dados.get("material_apreendido_tad") or "[]")
+    except Exception:
+        material_tad = []
+    material_tad = [m for m in material_tad if any((m.get(k) or "").strip() for k in ("Nº DO TAD", "DESCRIÇÃO DO MATERIAL", "DESTINO DO MATERIAL"))]
+    if material_tad:
+        tabela_tad = doc.add_table(rows=1, cols=3)
+        tabela_tad.style = "Table Grid"
+        hdr = tabela_tad.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text = "Nº do TAD", "Descrição do Material", "Destino do Material"
+        for cel in hdr:
+            for p in cel.paragraphs:
+                for r in p.runs:
+                    r.bold = True
+        for item_tad in material_tad:
+            linha = tabela_tad.add_row().cells
+            linha[0].text = str(item_tad.get("Nº DO TAD", "") or "")
+            linha[1].text = str(item_tad.get("DESCRIÇÃO DO MATERIAL", "") or "")
+            linha[2].text = str(item_tad.get("DESTINO DO MATERIAL", "") or "")
+    else:
+        doc.add_paragraph("Não se aplica.")
+
+    p_comp = doc.add_paragraph()
+    p_comp.add_run("1.4 - COMPLEMENTAÇÃO:").bold = True
+    doc.add_paragraph(dados.get("complementacao", "") or "Não se aplica.")
+
     p4 = doc.add_paragraph()
-    p4.add_run("3. DAS PROVIDÊNCIAS ADMINISTRATIVAS").bold = True
+    p4.add_run("2. DAS PROVIDÊNCIAS ADMINISTRATIVAS").bold = True
     doc.add_paragraph(dados.get("providencias", ""))
 
     doc.add_paragraph()
@@ -2689,6 +2715,11 @@ with aba_fiscalizacao:
         st.session_state["rf_bo_cadg_nr"] = _reg.get("bo_cadg_nr", "")
         st.session_state["rf_termo_apreensao_nr"] = _reg.get("termo_apreensao_nr", "")
         st.session_state["rf_termo_fiel_depositario_nr"] = _reg.get("termo_fiel_depositario_nr", "")
+        try:
+            st.session_state["rf_material_apreendido_tad"] = json.loads(_reg.get("material_apreendido_tad") or "[]") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
+        except Exception:
+            st.session_state["rf_material_apreendido_tad"] = [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
+        st.session_state["rf_complementacao"] = _reg.get("complementacao", "")
         st.session_state["rf_fatos_historico"] = _reg.get("fatos_historico", "")
         st.session_state["rf_valor_multa_texto"] = _reg.get("valor_multa_texto", "")
         st.session_state["rf_providencias"] = _reg.get("providencias", "")
@@ -2757,6 +2788,7 @@ with aba_fiscalizacao:
         "Comandante do 2ºGPM Barra do Aquidauana",
         "Delegacia de Polícia Civil de Bodoquena",
         "Delegacia de Polícia Civil de Miranda"
+        
     ]
     if "rf_interessado_multi" not in st.session_state:
         st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
@@ -2822,7 +2854,7 @@ with aba_fiscalizacao:
     with col_rf15:
         termo_fiel_depositario_nr_rf = st.text_input("Termo de Fiel Depositário nº", key="rf_termo_fiel_depositario_nr")
 
-    st.markdown("#### 1. DOS FATOS — 1. HISTÓRICO")
+    st.markdown("#### 1.1 - DO HISTÓRICO")
     fatos_historico_rf = campo_texto_com_voz("Histórico", "rf_fatos_historico", altura=220)
 
     st.markdown("##### Fotos")
@@ -2850,10 +2882,25 @@ with aba_fiscalizacao:
                 st.session_state["rf_fotos_list"].pop(i_foto)
                 st.rerun()
 
-    st.markdown("#### 2. DO VALOR DA MULTA")
+    st.markdown("#### 1.2 - DO VALOR DA MULTA")
     valor_multa_texto_rf = campo_texto_com_voz("Texto sobre a multa", "rf_valor_multa_texto", altura=100)
 
-    st.markdown("#### 3. DAS PROVIDÊNCIAS ADMINISTRATIVAS")
+    st.markdown("#### 1.3 - DO MATERIAL APREENDIDO")
+    st.caption("Clique em '+' no final da tabela para adicionar linhas, ou selecione e pressione 'Delete' para excluir.")
+    tabela_material_apreendido_rf = st.data_editor(
+        st.session_state.get("rf_material_apreendido_tad") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}],
+        num_rows="dynamic", use_container_width=True, key=f"rf_material_apreendido_editor_{st.session_state.get('rf_id_atual', 'novo')}",
+        column_config={
+            "Nº DO TAD": st.column_config.TextColumn("Nº do TAD"),
+            "DESCRIÇÃO DO MATERIAL": st.column_config.TextColumn("Descrição do Material", width="large"),
+            "DESTINO DO MATERIAL": st.column_config.TextColumn("Destino do Material", width="large"),
+        }
+    )
+
+    st.markdown("#### 1.4 - COMPLEMENTAÇÃO")
+    complementacao_rf = campo_texto_com_voz("Complementação (opcional)", "rf_complementacao", altura=100)
+
+    st.markdown("#### 2. DAS PROVIDÊNCIAS ADMINISTRATIVAS")
     providencias_rf = campo_texto_com_voz("Providências (uma por linha)", "rf_providencias", altura=150)
 
     st.markdown("#### Assinatura")
@@ -2911,6 +2958,8 @@ with aba_fiscalizacao:
             "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
             "bo_cadg_nr": bo_cadg_nr_rf, "fatos_historico": fatos_historico_rf,
             "termo_apreensao_nr": termo_apreensao_nr_rf, "termo_fiel_depositario_nr": termo_fiel_depositario_nr_rf,
+            "material_apreendido_tad": json.dumps(tabela_material_apreendido_rf, ensure_ascii=False),
+            "complementacao": complementacao_rf,
             "fotos": json.dumps(st.session_state["rf_fotos_list"], ensure_ascii=False),
             "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
             "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
