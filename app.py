@@ -2704,36 +2704,35 @@ with aba_fiscalizacao:
 
     # --- Busca dentro da própria aba (só nesta unidade) ---
     with st.expander("🔎 Buscar Relatório de Fiscalização (nesta unidade)"):
-        with st.form("form_busca_rf"):
-            termo_rf = st.text_input("Buscar por número ou nome do autuado", key="termo_busca_rf")
-            buscar_rf_clicado = st.form_submit_button("🔎 Buscar")
-        if buscar_rf_clicado and termo_rf:
-            resultados_rf = buscar_relatorios_fiscalizacao(termo_rf, unidade=st.session_state["unidade_operacional"])
-            if resultados_rf:
-                for reg in resultados_rf:
-                    col_r1, col_r2 = st.columns([5, 1])
-                    with col_r1:
-                        st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')}) — *{reg.get('status','Finalizado')}*")
-                    if reg.get("status") == "Finalizado":
-                        senha_desbloqueio_rf = st.text_input(
-                            "Senha do administrador para editar", type="password",
-                            key=f"senha_desbloqueio_rf_{reg['id']}", label_visibility="collapsed",
-                            placeholder="Senha do administrador para editar este relatório"
-                        )
-                        if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_rf_{reg['id']}", use_container_width=True):
-                            if senha_desbloqueio_rf == USUARIOS_PERMITIDOS.get("admin"):
-                                st.session_state["carregar_edicao_rf"] = reg
-                                registrar_auditoria(reg['id'], "fiscalizacao", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
-                                st.rerun()
-                            else:
-                                st.error("Senha de administrador incorreta. Edição não liberada.")
-                    else:
-                        with col_r2:
-                            if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
-                                st.session_state["carregar_edicao_rf"] = reg
-                                st.rerun()
-            else:
-                st.info("Nenhum relatório encontrado.")
+        termo_rf = st.text_input("Buscar por número ou nome do autuado", key="termo_busca_rf")
+        if st.button("🔎 Buscar", key="btn_buscar_rf"):
+            st.session_state["resultados_busca_rf"] = buscar_relatorios_fiscalizacao(termo_rf, unidade=st.session_state["unidade_operacional"]) if termo_rf else []
+        resultados_rf = st.session_state.get("resultados_busca_rf", [])
+        if resultados_rf:
+            for reg in resultados_rf:
+                col_r1, col_r2 = st.columns([5, 1])
+                with col_r1:
+                    st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')}) — *{reg.get('status','Finalizado')}*")
+                if reg.get("status") == "Finalizado":
+                    senha_desbloqueio_rf = st.text_input(
+                        "Senha do administrador para editar", type="password",
+                        key=f"senha_desbloqueio_rf_{reg['id']}", label_visibility="collapsed",
+                        placeholder="Senha do administrador para editar este relatório"
+                    )
+                    if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_rf_{reg['id']}", use_container_width=True):
+                        if senha_desbloqueio_rf == USUARIOS_PERMITIDOS.get("admin"):
+                            st.session_state["carregar_edicao_rf"] = reg
+                            registrar_auditoria(reg['id'], "fiscalizacao", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
+                            st.rerun()
+                        else:
+                            st.error("Senha de administrador incorreta. Edição não liberada.")
+                else:
+                    with col_r2:
+                        if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
+                            st.session_state["carregar_edicao_rf"] = reg
+                            st.rerun()
+        elif termo_rf and "resultados_busca_rf" in st.session_state:
+            st.info("Nenhum relatório encontrado.")
 
     st.divider()
 
