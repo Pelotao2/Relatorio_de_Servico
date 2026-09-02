@@ -937,6 +937,7 @@ def gerar_docx_fiscalizacao(dados):
     _docx_campo(doc, [("", "Auto de Infração nº:", dados.get("auto_infracao_nr", "")), ("", "Laudo de Constatação nº:", dados.get("laudo_constatacao_nr", ""))])
     _docx_campo(doc, [("", "Termo de Paralisação nº:", dados.get("termo_paralisacao_nr", "")), ("", "Notificação nº:", dados.get("notificacao_nr", ""))])
     _docx_campo(doc, [("", "Folhas Complementares (quantidade):", dados.get("folhas_complementares", "")), ("", "BO CADG nº:", dados.get("bo_cadg_nr", ""))])
+    _docx_campo(doc, [("", "Termo de Apreensão nº:", dados.get("termo_apreensao_nr", "")), ("", "Termo de Fiel Depositário nº:", dados.get("termo_fiel_depositario_nr", ""))])
 
     doc.add_paragraph()
     p1 = doc.add_paragraph()
@@ -2686,6 +2687,8 @@ with aba_fiscalizacao:
         st.session_state["rf_notificacao_nr"] = _reg.get("notificacao_nr", "")
         st.session_state["rf_folhas_complementares"] = _reg.get("folhas_complementares", 0) or 0
         st.session_state["rf_bo_cadg_nr"] = _reg.get("bo_cadg_nr", "")
+        st.session_state["rf_termo_apreensao_nr"] = _reg.get("termo_apreensao_nr", "")
+        st.session_state["rf_termo_fiel_depositario_nr"] = _reg.get("termo_fiel_depositario_nr", "")
         st.session_state["rf_fatos_historico"] = _reg.get("fatos_historico", "")
         st.session_state["rf_valor_multa_texto"] = _reg.get("valor_multa_texto", "")
         st.session_state["rf_providencias"] = _reg.get("providencias", "")
@@ -2752,7 +2755,9 @@ with aba_fiscalizacao:
         "Ministério Público Estadual (MPE)",
         "CPAmb/1ºBPMA",
         "Comandante do 2ºPPMA de Miranda",
-        "Comandante do 2ºGPM Barra do Aquidauana"
+        "Comandante do 2ºGPM Barra do Aquidauana",
+        "Delegacia de Polícia Civil de Aquidauana",
+        "Delegacia de Pol´cia Civil de Miranda"
     ]
     if "rf_interessado_multi" not in st.session_state:
         st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
@@ -2812,6 +2817,11 @@ with aba_fiscalizacao:
         folhas_complementares_rf = st.number_input("Folhas Complementares (quantidade)", min_value=0, step=1, key="rf_folhas_complementares")
     with col_rf13:
         bo_cadg_nr_rf = st.text_input("BO CADG nº", key="rf_bo_cadg_nr")
+    col_rf14, col_rf15 = st.columns(2)
+    with col_rf14:
+        termo_apreensao_nr_rf = st.text_input("Termo de Apreensão nº", key="rf_termo_apreensao_nr")
+    with col_rf15:
+        termo_fiel_depositario_nr_rf = st.text_input("Termo de Fiel Depositário nº", key="rf_termo_fiel_depositario_nr")
 
     st.markdown("#### 1. DOS FATOS — 1. HISTÓRICO")
     fatos_historico_rf = campo_texto_com_voz("Histórico", "rf_fatos_historico", altura=220)
@@ -2901,6 +2911,7 @@ with aba_fiscalizacao:
             "laudo_constatacao_nr": laudo_constatacao_nr_rf, "termo_paralisacao_nr": termo_paralisacao_nr_rf,
             "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
             "bo_cadg_nr": bo_cadg_nr_rf, "fatos_historico": fatos_historico_rf,
+            "termo_apreensao_nr": termo_apreensao_nr_rf, "termo_fiel_depositario_nr": termo_fiel_depositario_nr_rf,
             "fotos": json.dumps(st.session_state["rf_fotos_list"], ensure_ascii=False),
             "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
             "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
