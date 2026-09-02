@@ -2756,8 +2756,8 @@ with aba_fiscalizacao:
         "CPAmb/1ºBPMA",
         "Comandante do 2ºPPMA de Miranda",
         "Comandante do 2ºGPM Barra do Aquidauana",
-        "Delegacia de Polícia Civil de Aquidauana",
-        "Delegacia de Pol´cia Civil de Miranda"
+        "Delegacia de Polícia Civil de Bodoquena",
+        "Delegacia de Polícia Civil de Miranda"
     ]
     if "rf_interessado_multi" not in st.session_state:
         st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
