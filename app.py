@@ -4,6 +4,7 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import tempfile
 from dotenv import load_dotenv
 import time
 import html
@@ -1426,10 +1427,215 @@ def campo_multiplo(label, session_key, placeholder_prefix=None):
 
     return [v.strip() for v in st.session_state[session_key] if v.strip() != ""]
 
+# ==========================================================================
+# EDITOR COM MARCA-TEXTO PARA AS ORDENS DE OPERAÇÃO
+# Componente próprio, sem pacote extra: o HTML é gravado numa pasta temporária
+# na primeira execução e registrado como componente bidirecional do Streamlit.
+# O texto vai pro banco com marcações simples, ex.: [[vm]]Será obrigatória[[/vm]].
+# ==========================================================================
+CORES_DESTAQUE = {
+    "vm": {"fundo": "#ffcdd2", "borda": "#e53935", "rotulo": "Obrigatório / Proibido"},
+    "am": {"fundo": "#fff59d", "borda": "#f9a825", "rotulo": "Atenção / Prazo / Link"},
+    "vd": {"fundo": "#c8e6c9", "borda": "#43a047", "rotulo": "Orientação / Procedimento"},
+}
+_RE_DESTAQUE = re.compile(r"\[\[(vm|am|vd)\]\](.*?)\[\[/\1\]\]", re.DOTALL)
+
+_HTML_EDITOR = r"""<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --fundo:#f0f2f6; --texto:#31333f; --borda:#d0d3da; --foco:#ff4b4b; }
+  html,body { margin:0; padding:0; font-family:"Source Sans Pro","Source Sans 3",sans-serif; color:var(--texto); background:transparent; }
+  .rotulo { font-size:14px; margin:0 0 6px 2px; }
+  .barra { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; align-items:center; }
+  .barra button { border:1px solid var(--borda); background:#fff; border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; color:#31333f; }
+  .barra button:hover { filter:brightness(0.95); }
+  .barra .bola { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
+  .dica { font-size:12px; color:#808495; margin-left:4px; }
+  #ed { min-height:var(--alt,110px); background:var(--fundo); border:1px solid transparent; border-radius:8px; padding:12px 14px;
+        font-size:14px; line-height:1.55; outline:none; white-space:pre-wrap; word-wrap:break-word; }
+  #ed:focus { border-color:var(--foco); }
+  #ed:empty:before { content:attr(data-ph); color:#a3a8b8; }
+  mark { padding:1px 2px; border-radius:3px; font-weight:700; color:#1b1b1b; }
+  mark[data-c="vm"] { background:#ffcdd2; box-shadow:inset 0 -2px 0 #e53935; }
+  mark[data-c="am"] { background:#fff59d; box-shadow:inset 0 -2px 0 #f9a825; }
+  mark[data-c="vd"] { background:#c8e6c9; box-shadow:inset 0 -2px 0 #43a047; }
+</style></head><body>
+<div class="rotulo" id="rotulo"></div>
+<div class="barra">
+  <button type="button" data-cor="vm"><span class="bola" style="background:#ef9a9a"></span>Obrigatório / Proibido</button>
+  <button type="button" data-cor="am"><span class="bola" style="background:#fff176"></span>Atenção / Prazo</button>
+  <button type="button" data-cor="vd"><span class="bola" style="background:#a5d6a7"></span>Orientação</button>
+  <button type="button" data-cor="limpar">🧽 Tirar destaque</button>
+  <span class="dica">Selecione o trecho e clique na cor.</span>
+</div>
+<div id="ed" contenteditable="true" spellcheck="true"></div>
+<script>
+(function(){
+  const ed = document.getElementById("ed");
+  let iniciado = false, ultimoEnviado = null, timer = null, ultimoRange = null;
+
+  function send(type, extra){ window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, extra||{}), "*"); }
+  function ajustarAltura(){ send("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+  function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+  // tokens -> HTML
+  function tokensParaHtml(t){
+    let h = esc(t || "");
+    h = h.replace(/\[\[(vm|am|vd)\]\]([\s\S]*?)\[\[\/\1\]\]/g, (m,c,txt)=>'<mark data-c="'+c+'">'+txt+'</mark>');
+    return h.replace(/\n/g, "<br>");
+  }
+  // HTML do editor -> tokens
+  function serializar(no, dentroMark){
+    let s = "";
+    no.childNodes.forEach((n, i) => {
+      if (n.nodeType === 3) { s += n.nodeValue; return; }
+      if (n.nodeType !== 1) return;
+      const tag = n.tagName;
+      if (tag === "BR") { s += "\n"; return; }
+      if (tag === "MARK" && !dentroMark) {
+        const c = n.getAttribute("data-c"); const dentro = serializar(n, true);
+        s += (c && dentro.trim()) ? "[[" + c + "]]" + dentro + "[[/" + c + "]]" : dentro; return;
+      }
+      if ((tag === "DIV" || tag === "P") ) {
+        if (s.length && !s.endsWith("\n")) s += "\n";
+        s += serializar(n, dentroMark); if (!s.endsWith("\n")) s += "\n"; return;
+      }
+      s += serializar(n, dentroMark);
+    });
+    return s;
+  }
+  function valorAtual(){ return serializar(ed, false).replace(/ /g," ").replace(/\n{3,}/g,"\n\n").replace(/\s+$/,""); }
+  function enviar(){
+    const v = valorAtual();
+    if (v !== ultimoEnviado){ ultimoEnviado = v; send("streamlit:setComponentValue", {value: v, dataType: "json"}); }
+    ajustarAltura();
+  }
+  function agendar(){ clearTimeout(timer); timer = setTimeout(enviar, 500); ajustarAltura(); }
+
+  function desembrulhar(el){ const p = el.parentNode; while (el.firstChild) p.insertBefore(el.firstChild, el); p.removeChild(el); }
+
+  function aplicar(cor){
+    const sel = window.getSelection();
+    let range = (sel && sel.rangeCount && ed.contains(sel.getRangeAt(0).commonAncestorContainer)) ? sel.getRangeAt(0) : ultimoRange;
+    if (!range || range.collapsed) {
+      // Sem seleção: se o cursor estiver dentro de um destaque, "Tirar destaque" remove ele inteiro.
+      if (cor === "limpar" && range) {
+        let n = range.startContainer; while (n && n !== ed) { if (n.nodeType===1 && n.tagName==="MARK"){ desembrulhar(n); enviar(); return; } n = n.parentNode; }
+      }
+      return;
+    }
+    // Se a seleção está toda dentro de um destaque, sobe o range para englobá-lo, evitando destaque dentro de destaque.
+    let anc = range.commonAncestorContainer; while (anc && anc !== ed) { if (anc.nodeType===1 && anc.tagName==="MARK"){ range.selectNode(anc); break; } anc = anc.parentNode; }
+    const frag = range.extractContents();
+    frag.querySelectorAll && frag.querySelectorAll("mark").forEach(desembrulhar);
+    if (cor === "limpar") { range.insertNode(frag); }
+    else {
+      const m = document.createElement("mark"); m.setAttribute("data-c", cor); m.appendChild(frag);
+      range.insertNode(m);
+      const r2 = document.createRange(); r2.setStartAfter(m); r2.collapse(true); sel.removeAllRanges(); sel.addRange(r2);
+    }
+    ed.querySelectorAll("mark").forEach(mk => { if (!mk.textContent.length) mk.remove(); });
+    ed.normalize(); enviar();
+  }
+
+  document.querySelectorAll(".barra button").forEach(b => {
+    b.addEventListener("mousedown", e => e.preventDefault());   // não perde a seleção ao clicar
+    b.addEventListener("click", () => aplicar(b.getAttribute("data-cor")));
+  });
+  document.addEventListener("selectionchange", () => {
+    const s = window.getSelection(); if (s && s.rangeCount && ed.contains(s.getRangeAt(0).commonAncestorContainer)) ultimoRange = s.getRangeAt(0).cloneRange();
+  });
+  ed.addEventListener("input", agendar);
+  ed.addEventListener("blur", enviar);
+  ed.addEventListener("paste", e => {   // cola só texto puro (sem formatação estranha de Word/PDF)
+    e.preventDefault(); const t = (e.clipboardData || window.clipboardData).getData("text/plain");
+    document.execCommand("insertText", false, t);
+  });
+
+  window.addEventListener("message", ev => {
+    const d = ev.data; if (!d || d.type !== "streamlit:render") return;
+    const a = d.args || {};
+    if (!iniciado) {
+      iniciado = true;
+      document.getElementById("rotulo").textContent = a.rotulo || "";
+      ed.setAttribute("data-ph", a.placeholder || "");
+      if (a.altura) ed.style.setProperty("--alt", a.altura + "px");
+      ed.innerHTML = tokensParaHtml(a.valor || "");
+      ultimoEnviado = a.valor || "";
+      send("streamlit:setComponentValue", {value: ultimoEnviado, dataType: "json"});
+    }
+    ajustarAltura();
+  });
+  send("streamlit:componentReady", {apiVersion: 1});
+  window.addEventListener("resize", ajustarAltura);
+})();
+</script></body></html>"""
+
+
+@st.cache_resource
+def _componente_editor_destaque():
+    """Grava o HTML do editor numa pasta temporária e registra o componente.
+    Fica em cache: só acontece uma vez por instância do app."""
+    pasta = os.path.join(tempfile.gettempdir(), "editor_destaque_pm_v2")
+    os.makedirs(pasta, exist_ok=True)
+    with open(os.path.join(pasta, "index.html"), "w", encoding="utf-8") as f:
+        f.write(_HTML_EDITOR)
+    return components.declare_component("editor_destaque_pm", path=pasta)
+
+
+def editor_com_destaque(rotulo, valor="", key=None, altura=110, placeholder=""):
+    """Caixa de texto com marca-texto em 3 cores. Devolve o texto com marcações
+    ([[vm]]...[[/vm]] etc.). Se o componente falhar por qualquer motivo, cai
+    num st.text_area comum (o texto continua funcionando, só sem as cores)."""
+    try:
+        valor_editado = _componente_editor_destaque()(
+            rotulo=rotulo, valor=valor or "", altura=altura, placeholder=placeholder,
+            key=key, default=valor or ""
+        )
+        return valor_editado if isinstance(valor_editado, str) else (valor or "")
+    except Exception:
+        return st.text_area(rotulo, value=valor or "", height=altura, key=f"{key}_reserva")
+
+
+def remover_destaques(texto):
+    """Texto limpo, sem as marcações (para copiar no CADG, Excel etc.)."""
+    return _RE_DESTAQUE.sub(lambda m: m.group(2), texto or "")
+
+
+def renderizar_destaques(texto):
+    """Converte as marcações em HTML colorido e seguro (escapa todo o resto)."""
+    seguro = html.escape(texto or "")
+    def _troca(m):
+        cor = CORES_DESTAQUE[m.group(1)]
+        return (f'<mark style="background:{cor["fundo"]}; box-shadow:inset 0 -2px 0 {cor["borda"]}; '
+                f'padding:1px 3px; border-radius:3px; color:#1b1b1b;"><b>{m.group(2)}</b></mark>')
+    seguro = re.sub(r"\[\[(vm|am|vd)\]\](.*?)\[\[/\1\]\]", _troca, seguro, flags=re.DOTALL)
+    return seguro.replace("\n", "<br>")
+
+
+def legenda_destaques_html():
+    itens = "".join(
+        f'<span style="display:inline-block; margin:2px 10px 2px 0;"><mark style="background:{c["fundo"]}; '
+        f'box-shadow:inset 0 -2px 0 {c["borda"]}; padding:0 6px; border-radius:3px;">&nbsp;</mark> {c["rotulo"]}</span>'
+        for c in CORES_DESTAQUE.values()
+    )
+    return f'<div style="font-size:0.82em; color:#555; margin:4px 0 8px 0;">Legenda: {itens}</div>'
+
 # Criando as abas principais na interface do usuário
-aba_policial, aba_fiscalizacao, aba_ordens, aba_adm = st.tabs(
-    ["Formulário de Serviço", "📋 Relatório de Fiscalização", "📑 Ordens de Operação", "Painel Estratégico (Adm)"]
-)
+# Relatório de Fiscalização DESATIVADO (05/11/2026): o documento gerado não ficava
+# igual ao modelo padronizado pelo Batalhão. A aba some para o efetivo, mas o código
+# e a tabela no banco continuam intactos (os relatórios antigos seguem consultáveis
+# no Painel do Admin). Para reativar, basta trocar para True.
+RELATORIO_FISCALIZACAO_ATIVO = False
+if RELATORIO_FISCALIZACAO_ATIVO:
+    aba_policial, aba_fiscalizacao, aba_ordens, aba_adm = st.tabs(
+        ["Formulário de Serviço", "📋 Relatório de Fiscalização", "📑 Ordens de Operação", "Painel Estratégico (Adm)"]
+    )
+else:
+    aba_policial, aba_ordens, aba_adm = st.tabs(
+        ["Formulário de Serviço", "📑 Ordens de Operação", "Painel Estratégico (Adm)"]
+    )
+    aba_fiscalizacao = None
 
 # ------------------------------------------
 # VISÃO 3: ORDENS DE OPERAÇÃO → ORDENS DE SERVIÇO
@@ -1462,8 +1668,9 @@ with aba_ordens:
                     st.session_state["ordem_data_inicio_input"] = sugestao_nova["data_inicio"]
                 if sugestao_nova.get("data_fim"):
                     st.session_state["ordem_data_fim_input"] = sugestao_nova["data_fim"]
-                st.session_state["ordem_finalidade_input"] = sugestao_nova.get("finalidade") or ""
-                st.session_state["ordem_cadg_kobo_input"] = sugestao_nova.get("cadg_kobo") or ""
+                # Os dois textos longos agora usam o editor com marca-texto: para ele
+                # recarregar com a sugestão do PDF, basta trocar a "geração" (chave nova).
+                st.session_state["ordem_editor_geracao"] = st.session_state.get("ordem_editor_geracao", 0) + 1
 
                 if not any(sugestao_nova.values()):
                     st.session_state["_msg_leitura_ordem"] = ("warning", "Não consegui identificar nenhum campo automaticamente — talvez o PDF tenha um formato diferente do modelo que vimos. Preencha manualmente abaixo.")
@@ -1499,14 +1706,19 @@ with aba_ordens:
         linhas_estimadas = max(1, len(texto or "") // 90) + (texto or "").count("\n") + 2
         return int(min(maximo, max(minimo, 24 * linhas_estimadas)))
 
-    finalidade_ordem = st.text_area(
+    _ger_editor = st.session_state.get("ordem_editor_geracao", 0)
+    finalidade_ordem = editor_com_destaque(
         "A equipe deverá realizar... (resumo da finalidade — confira/edite o que o PDF sugeriu)",
-        value=sugestao.get("finalidade") or "", height=_altura_dinamica(sugestao.get("finalidade")), key="ordem_finalidade_input"
+        valor=sugestao.get("finalidade") or "", altura=min(_altura_dinamica(sugestao.get("finalidade")), 220),
+        key=f"ordem_finalidade_editor_{_ger_editor}"
     )
-    cadg_kobo_ordem = st.text_area(
+    cadg_kobo_ordem = editor_com_destaque(
         "Instruções de CADG / KoboToolbox específicas desta Ordem (opcional — se vazio, usa o texto padrão)",
-        value=sugestao.get("cadg_kobo") or "", height=_altura_dinamica(sugestao.get("cadg_kobo")), key="ordem_cadg_kobo_input"
+        valor=sugestao.get("cadg_kobo") or "", altura=min(_altura_dinamica(sugestao.get("cadg_kobo")), 260),
+        key=f"ordem_cadg_kobo_editor_{_ger_editor}"
     )
+    st.markdown(legenda_destaques_html(), unsafe_allow_html=True)
+    st.caption("Use poucos destaques, só no que a equipe não pode deixar passar. Na impressão em preto e branco o destaque continua aparecendo em negrito.")
 
     st.markdown("###### 📎 Modelo de Relatório (opcional)")
     st.caption(
@@ -1524,7 +1736,7 @@ with aba_ordens:
     )
 
     if st.button("✅ Confirmar e Criar Ordem de Serviço", type="primary", use_container_width=True):
-        if not numero_ordem or not finalidade_ordem:
+        if not numero_ordem or not remover_destaques(finalidade_ordem).strip():
             st.error("Preencha ao menos o número da Ordem e a finalidade antes de confirmar.")
         else:
             dados_ordem = {
@@ -1542,6 +1754,7 @@ with aba_ordens:
             else:
                 st.success(f"✅ Ordem de Serviço criada a partir da Operação {numero_ordem}!")
                 st.session_state["sugestao_ordem"] = None
+                st.session_state["ordem_editor_geracao"] = st.session_state.get("ordem_editor_geracao", 0) + 1
                 for _k in ("ordem_numero_input", "ordem_finalidade_input", "ordem_cadg_kobo_input",
                            "ordem_data_inicio_input", "ordem_data_fim_input"):
                     if _k in st.session_state:
@@ -1577,7 +1790,12 @@ with aba_ordens:
                         unsafe_allow_html=True
                     )
                 with st.expander("Ver Ordem de Serviço completa"):
-                    st.write(montar_texto_ordem_servico(ordem))
+                    _texto_os = montar_texto_ordem_servico(ordem)
+                    st.markdown(f'<div style="line-height:1.6;">{renderizar_destaques(_texto_os)}</div>', unsafe_allow_html=True)
+                    if remover_destaques(_texto_os) != _texto_os:
+                        st.markdown(legenda_destaques_html(), unsafe_allow_html=True)
+                    st.caption("📋 Texto limpo para copiar (sem as cores), ex.: para colar no CADG:")
+                    st.code(remover_destaques(_texto_os), language=None, wrap_lines=True)
                 with st.expander("📊 Ver Estatísticas desta Operação"):
                     _conn_stats = init_connection()
                     if _conn_stats:
@@ -2734,329 +2952,330 @@ with aba_policial:
 # ------------------------------------------
 # VISÃO 3: RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL
 # ------------------------------------------
-with aba_fiscalizacao:
-    st.markdown("# 📋 RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL")
-    st.caption(f"Unidade: **{st.session_state['unidade_operacional']}**")
+if aba_fiscalizacao is not None:
+    with aba_fiscalizacao:
+        st.markdown("# 📋 RELATÓRIO DE FISCALIZAÇÃO AMBIENTAL")
+        st.caption(f"Unidade: **{st.session_state['unidade_operacional']}**")
 
-    if "rf_fotos_list" not in st.session_state:
-        st.session_state["rf_fotos_list"] = []
-    if "rf_id_atual" not in st.session_state:
-        st.session_state["rf_id_atual"] = None
-    if "rf_numero_atual" not in st.session_state:
-        st.session_state["rf_numero_atual"] = None
-
-    # --- Carrega um relatório encontrado na busca (antes dos widgets) ---
-    if st.session_state.get("carregar_edicao_rf") is not None:
-        _reg = st.session_state.pop("carregar_edicao_rf")
-        st.session_state["rf_id_atual"] = _reg["id"]
-        st.session_state["rf_numero_atual"] = _reg.get("numero")
-        _interessado_carregado = _reg.get("interessado", "") or ""
-        st.session_state["rf_interessado_multi"] = [v.strip() for v in _interessado_carregado.split(";") if v.strip()]
-        st.session_state["rf_nome_autuado"] = _reg.get("nome_autuado", "")
-        st.session_state["rf_cpf_cnpj"] = _reg.get("cpf_cnpj", "")
-        st.session_state["rf_rg_ie"] = _reg.get("rg_ie", "")
-        st.session_state["rf_endereco"] = _reg.get("endereco", "")
-        st.session_state["rf_local"] = _reg.get("local_fiscalizacao", "")
-        if _reg.get("data_fiscalizacao"):
-            st.session_state["rf_data_fiscalizacao"] = _reg.get("data_fiscalizacao")
-        st.session_state["rf_geo_formato"] = "Graus Decimais (DD)"
-        st.session_state["rf_geo_lat_dd"] = float(_reg.get("latitude") or 0.0)
-        st.session_state["rf_geo_lon_dd"] = float(_reg.get("longitude") or 0.0)
-        st.session_state["rf_municipio"] = _reg.get("municipio", "Miranda")
-        st.session_state["rf_telefone"] = _reg.get("telefone", "")
-        st.session_state["rf_legislacao"] = _reg.get("legislacao", "")
-        st.session_state["rf_auto_infracao_nr"] = _reg.get("auto_infracao_nr", "")
-        st.session_state["rf_laudo_constatacao_nr"] = _reg.get("laudo_constatacao_nr", "")
-        st.session_state["rf_termo_paralisacao_nr"] = _reg.get("termo_paralisacao_nr", "")
-        st.session_state["rf_notificacao_nr"] = _reg.get("notificacao_nr", "")
-        st.session_state["rf_folhas_complementares"] = _reg.get("folhas_complementares", 0) or 0
-        st.session_state["rf_bo_cadg_nr"] = _reg.get("bo_cadg_nr", "")
-        st.session_state["rf_termo_apreensao_nr"] = _reg.get("termo_apreensao_nr", "")
-        st.session_state["rf_termo_fiel_depositario_nr"] = _reg.get("termo_fiel_depositario_nr", "")
-        try:
-            st.session_state["rf_material_apreendido_tad"] = json.loads(_reg.get("material_apreendido_tad") or "[]") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
-        except Exception:
-            st.session_state["rf_material_apreendido_tad"] = [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
-        st.session_state["rf_complementacao"] = _reg.get("complementacao", "")
-        st.session_state["rf_fatos_historico"] = _reg.get("fatos_historico", "")
-        st.session_state["rf_valor_multa_texto"] = _reg.get("valor_multa_texto", "")
-        st.session_state["rf_providencias"] = _reg.get("providencias", "")
-        st.session_state["rf_municipio_assinatura"] = _reg.get("municipio_assinatura", "Miranda (MS)")
-        if _reg.get("data_assinatura"):
-            st.session_state["rf_data_assinatura"] = _reg.get("data_assinatura")
-        st.session_state["rf_relator"] = _reg.get("relator", "")
-        st.session_state["rf_cargo_relator"] = _reg.get("cargo_relator", "Cmt. da GU Ambiental/Relator")
-        try:
-            st.session_state["rf_fotos_list"] = json.loads(_reg.get("fotos") or "[]")
-        except Exception:
+        if "rf_fotos_list" not in st.session_state:
             st.session_state["rf_fotos_list"] = []
+        if "rf_id_atual" not in st.session_state:
+            st.session_state["rf_id_atual"] = None
+        if "rf_numero_atual" not in st.session_state:
+            st.session_state["rf_numero_atual"] = None
 
-    # --- Busca dentro da própria aba (só nesta unidade) ---
-    with st.expander("🔎 Buscar Relatório de Fiscalização (nesta unidade)"):
-        termo_rf = st.text_input("Buscar por número ou nome do autuado", key="termo_busca_rf")
-        if st.button("🔎 Buscar", key="btn_buscar_rf"):
-            st.session_state["resultados_busca_rf"] = buscar_relatorios_fiscalizacao(termo_rf, unidade=st.session_state["unidade_operacional"]) if termo_rf else []
-        resultados_rf = st.session_state.get("resultados_busca_rf", [])
-        if resultados_rf:
-            for reg in resultados_rf:
-                col_r1, col_r2 = st.columns([5, 1])
-                with col_r1:
-                    st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')}) — *{reg.get('status','Finalizado')}*")
-                if reg.get("status") == "Finalizado":
-                    senha_desbloqueio_rf = st.text_input(
-                        "Senha do administrador para editar", type="password",
-                        key=f"senha_desbloqueio_rf_{reg['id']}", label_visibility="collapsed",
-                        placeholder="Senha do administrador para editar este relatório"
-                    )
-                    if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_rf_{reg['id']}", use_container_width=True):
-                        if senha_desbloqueio_rf == USUARIOS_PERMITIDOS.get("admin"):
-                            st.session_state["carregar_edicao_rf"] = reg
-                            registrar_auditoria(reg['id'], "fiscalizacao", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
-                            st.rerun()
-                        else:
-                            st.error("Senha de administrador incorreta. Edição não liberada.")
-                else:
-                    with col_r2:
-                        if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
-                            st.session_state["carregar_edicao_rf"] = reg
-                            st.rerun()
-        elif termo_rf and "resultados_busca_rf" in st.session_state:
-            st.info("Nenhum relatório encontrado.")
-
-    st.divider()
-
-    if st.session_state["rf_id_atual"]:
-        col_novo1, col_novo2 = st.columns([4, 1])
-        with col_novo1:
-            st.info(f"✏️ Editando o relatório **Nº {st.session_state['rf_numero_atual']}**")
-        with col_novo2:
-            if st.button("➕ Novo Relatório", use_container_width=True, key="novo_rf_btn"):
-                for k in [k for k in st.session_state.keys() if k.startswith("rf_")]:
-                    del st.session_state[k]
+        # --- Carrega um relatório encontrado na busca (antes dos widgets) ---
+        if st.session_state.get("carregar_edicao_rf") is not None:
+            _reg = st.session_state.pop("carregar_edicao_rf")
+            st.session_state["rf_id_atual"] = _reg["id"]
+            st.session_state["rf_numero_atual"] = _reg.get("numero")
+            _interessado_carregado = _reg.get("interessado", "") or ""
+            st.session_state["rf_interessado_multi"] = [v.strip() for v in _interessado_carregado.split(";") if v.strip()]
+            st.session_state["rf_nome_autuado"] = _reg.get("nome_autuado", "")
+            st.session_state["rf_cpf_cnpj"] = _reg.get("cpf_cnpj", "")
+            st.session_state["rf_rg_ie"] = _reg.get("rg_ie", "")
+            st.session_state["rf_endereco"] = _reg.get("endereco", "")
+            st.session_state["rf_local"] = _reg.get("local_fiscalizacao", "")
+            if _reg.get("data_fiscalizacao"):
+                st.session_state["rf_data_fiscalizacao"] = _reg.get("data_fiscalizacao")
+            st.session_state["rf_geo_formato"] = "Graus Decimais (DD)"
+            st.session_state["rf_geo_lat_dd"] = float(_reg.get("latitude") or 0.0)
+            st.session_state["rf_geo_lon_dd"] = float(_reg.get("longitude") or 0.0)
+            st.session_state["rf_municipio"] = _reg.get("municipio", "Miranda")
+            st.session_state["rf_telefone"] = _reg.get("telefone", "")
+            st.session_state["rf_legislacao"] = _reg.get("legislacao", "")
+            st.session_state["rf_auto_infracao_nr"] = _reg.get("auto_infracao_nr", "")
+            st.session_state["rf_laudo_constatacao_nr"] = _reg.get("laudo_constatacao_nr", "")
+            st.session_state["rf_termo_paralisacao_nr"] = _reg.get("termo_paralisacao_nr", "")
+            st.session_state["rf_notificacao_nr"] = _reg.get("notificacao_nr", "")
+            st.session_state["rf_folhas_complementares"] = _reg.get("folhas_complementares", 0) or 0
+            st.session_state["rf_bo_cadg_nr"] = _reg.get("bo_cadg_nr", "")
+            st.session_state["rf_termo_apreensao_nr"] = _reg.get("termo_apreensao_nr", "")
+            st.session_state["rf_termo_fiel_depositario_nr"] = _reg.get("termo_fiel_depositario_nr", "")
+            try:
+                st.session_state["rf_material_apreendido_tad"] = json.loads(_reg.get("material_apreendido_tad") or "[]") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
+            except Exception:
+                st.session_state["rf_material_apreendido_tad"] = [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}]
+            st.session_state["rf_complementacao"] = _reg.get("complementacao", "")
+            st.session_state["rf_fatos_historico"] = _reg.get("fatos_historico", "")
+            st.session_state["rf_valor_multa_texto"] = _reg.get("valor_multa_texto", "")
+            st.session_state["rf_providencias"] = _reg.get("providencias", "")
+            st.session_state["rf_municipio_assinatura"] = _reg.get("municipio_assinatura", "Miranda (MS)")
+            if _reg.get("data_assinatura"):
+                st.session_state["rf_data_assinatura"] = _reg.get("data_assinatura")
+            st.session_state["rf_relator"] = _reg.get("relator", "")
+            st.session_state["rf_cargo_relator"] = _reg.get("cargo_relator", "Cmt. da GU Ambiental/Relator")
+            try:
+                st.session_state["rf_fotos_list"] = json.loads(_reg.get("fotos") or "[]")
+            except Exception:
                 st.session_state["rf_fotos_list"] = []
-                st.session_state["rf_id_atual"] = None
-                st.session_state["rf_numero_atual"] = None
-                st.rerun()
 
-    lista_interessados_padrao = [
-        "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)",
-        "Ministério Público Estadual (MPE)",
-        "CPAmb/1ºBPMA",
-        "Comandante do 2ºPPMA de Miranda",
-        "Comandante do 2ºGPM Barra do Aquidauana",
-        "Delegacia de Polícia Civil de Bodoquena",
-        "Delegacia de Polícia Civil de Miranda"
+        # --- Busca dentro da própria aba (só nesta unidade) ---
+        with st.expander("🔎 Buscar Relatório de Fiscalização (nesta unidade)"):
+            termo_rf = st.text_input("Buscar por número ou nome do autuado", key="termo_busca_rf")
+            if st.button("🔎 Buscar", key="btn_buscar_rf"):
+                st.session_state["resultados_busca_rf"] = buscar_relatorios_fiscalizacao(termo_rf, unidade=st.session_state["unidade_operacional"]) if termo_rf else []
+            resultados_rf = st.session_state.get("resultados_busca_rf", [])
+            if resultados_rf:
+                for reg in resultados_rf:
+                    col_r1, col_r2 = st.columns([5, 1])
+                    with col_r1:
+                        st.write(f"**{reg.get('numero','')}** — {reg.get('nome_autuado','')} ({reg.get('data_fiscalizacao','')}) — *{reg.get('status','Finalizado')}*")
+                    if reg.get("status") == "Finalizado":
+                        senha_desbloqueio_rf = st.text_input(
+                            "Senha do administrador para editar", type="password",
+                            key=f"senha_desbloqueio_rf_{reg['id']}", label_visibility="collapsed",
+                            placeholder="Senha do administrador para editar este relatório"
+                        )
+                        if st.button("🔓 Desbloquear e Editar", key=f"desbloquear_rf_{reg['id']}", use_container_width=True):
+                            if senha_desbloqueio_rf == USUARIOS_PERMITIDOS.get("admin"):
+                                st.session_state["carregar_edicao_rf"] = reg
+                                registrar_auditoria(reg['id'], "fiscalizacao", "Liberação de Edição (Admin)", st.session_state.get("usuario_conectado", ""))
+                                st.rerun()
+                            else:
+                                st.error("Senha de administrador incorreta. Edição não liberada.")
+                    else:
+                        with col_r2:
+                            if st.button("👁️ Abrir", key=f"abrir_rf_{reg['id']}", use_container_width=True):
+                                st.session_state["carregar_edicao_rf"] = reg
+                                st.rerun()
+            elif termo_rf and "resultados_busca_rf" in st.session_state:
+                st.info("Nenhum relatório encontrado.")
+
+        st.divider()
+
+        if st.session_state["rf_id_atual"]:
+            col_novo1, col_novo2 = st.columns([4, 1])
+            with col_novo1:
+                st.info(f"✏️ Editando o relatório **Nº {st.session_state['rf_numero_atual']}**")
+            with col_novo2:
+                if st.button("➕ Novo Relatório", use_container_width=True, key="novo_rf_btn"):
+                    for k in [k for k in st.session_state.keys() if k.startswith("rf_")]:
+                        del st.session_state[k]
+                    st.session_state["rf_fotos_list"] = []
+                    st.session_state["rf_id_atual"] = None
+                    st.session_state["rf_numero_atual"] = None
+                    st.rerun()
+
+        lista_interessados_padrao = [
+            "Instituto de Meio Ambiente de Mato Grosso do Sul (IMASUL)",
+            "Ministério Público Estadual (MPE)",
+            "CPAmb/1ºBPMA",
+            "Comandante do 2ºPPMA de Miranda",
+            "Comandante do 2ºGPM Barra do Aquidauana",
+            "Delegacia de Polícia Civil de Bodoquena",
+            "Delegacia de Polícia Civil de Miranda"
         
-    ]
-    if "rf_interessado_multi" not in st.session_state:
-        st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
+        ]
+        if "rf_interessado_multi" not in st.session_state:
+            st.session_state["rf_interessado_multi"] = lista_interessados_padrao.copy()
 
-    interessados_sel_rf = st.multiselect(
-        "Interessado(s)",
-        options=lista_interessados_padrao,
-        key="rf_interessado_multi"
-    )
-    interessado_rf = "; ".join(interessados_sel_rf)
-    st.markdown("#### DO AUTUADO/FISCALIZADO")
-    nome_autuado_rf = st.text_input("01 - Nome/Nome Empresarial", key="rf_nome_autuado")
-    col_rf1, col_rf2 = st.columns(2)
-    with col_rf1:
-        cpf_cnpj_rf = st.text_input("02 - CPF/CNPJ", key="rf_cpf_cnpj")
-    with col_rf2:
-        rg_ie_rf = st.text_input("03 - RG/Insc. Estadual", key="rf_rg_ie")
-    endereco_rf = st.text_area("04 - Endereço Completo", key="rf_endereco", height=70)
-    st.markdown(
-        f'<div class="print-only-text"><strong>Endereço Completo:</strong><br>{html.escape(endereco_rf or "—").replace(chr(10), "<br>")}</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown("#### DA INFRAÇÃO/FISCALIZAÇÃO")
-    col_rf3, col_rf4 = st.columns(2)
-    with col_rf3:
-        local_rf = st.text_area("05 - Local", key="rf_local", height=70)
+        interessados_sel_rf = st.multiselect(
+            "Interessado(s)",
+            options=lista_interessados_padrao,
+            key="rf_interessado_multi"
+        )
+        interessado_rf = "; ".join(interessados_sel_rf)
+        st.markdown("#### DO AUTUADO/FISCALIZADO")
+        nome_autuado_rf = st.text_input("01 - Nome/Nome Empresarial", key="rf_nome_autuado")
+        col_rf1, col_rf2 = st.columns(2)
+        with col_rf1:
+            cpf_cnpj_rf = st.text_input("02 - CPF/CNPJ", key="rf_cpf_cnpj")
+        with col_rf2:
+            rg_ie_rf = st.text_input("03 - RG/Insc. Estadual", key="rf_rg_ie")
+        endereco_rf = st.text_area("04 - Endereço Completo", key="rf_endereco", height=70)
         st.markdown(
-            f'<div class="print-only-text"><strong>Local:</strong><br>{html.escape(local_rf or "—").replace(chr(10), "<br>")}</div>',
+            f'<div class="print-only-text"><strong>Endereço Completo:</strong><br>{html.escape(endereco_rf or "—").replace(chr(10), "<br>")}</div>',
             unsafe_allow_html=True
         )
-    with col_rf4:
-        data_fiscalizacao_rf = st.date_input("06 - Data", value=datetime.now(), key="rf_data_fiscalizacao")
-    col_rf6, col_rf7 = st.columns(2)
-    with col_rf6:
-        municipio_rf = st.selectbox("08 - Município", ["Miranda", "Bodoquena", "Anastácio", "Aquidauana", "Corumbá", "Bonito", "Jardim", "Outros"], key="rf_municipio")
-    with col_rf7:
-        telefone_rf = st.text_input("09 - Telefone", key="rf_telefone")
-
-    lat_rf, lon_rf, coordenadas_rf, area_geojson_rf = campo_geolocalizacao("rf_geo", permitir_area=True)
-
-    st.markdown("#### LEGISLAÇÃO APLICÁVEL")
-    legislacao_rf = campo_texto_com_voz("10 - Legislação (um artigo por linha)", "rf_legislacao", altura=100)
-
-    st.markdown("#### FORMULÁRIOS IMASUL")
-    col_rf8, col_rf9 = st.columns(2)
-    with col_rf8:
-        auto_infracao_nr_rf = st.text_input("Auto de Infração nº", key="rf_auto_infracao_nr")
-    with col_rf9:
-        laudo_constatacao_nr_rf = st.text_input("Laudo de Constatação nº", key="rf_laudo_constatacao_nr")
-    col_rf10, col_rf11 = st.columns(2)
-    with col_rf10:
-        termo_paralisacao_nr_rf = st.text_input("Termo de Paralisação nº", key="rf_termo_paralisacao_nr")
-    with col_rf11:
-        notificacao_nr_rf = st.text_input("Notificação nº", key="rf_notificacao_nr")
-    col_rf12, col_rf13 = st.columns(2)
-    with col_rf12:
-        folhas_complementares_rf = st.number_input("Folhas Complementares (quantidade)", min_value=0, step=1, key="rf_folhas_complementares")
-    with col_rf13:
-        bo_cadg_nr_rf = st.text_input("BO CADG nº", key="rf_bo_cadg_nr")
-    col_rf14, col_rf15 = st.columns(2)
-    with col_rf14:
-        termo_apreensao_nr_rf = st.text_input("Termo de Apreensão nº", key="rf_termo_apreensao_nr")
-    with col_rf15:
-        termo_fiel_depositario_nr_rf = st.text_input("Termo de Fiel Depositário nº", key="rf_termo_fiel_depositario_nr")
-
-    st.markdown("#### 1.1 - DO HISTÓRICO")
-    fatos_historico_rf = campo_texto_com_voz("Histórico", "rf_fatos_historico", altura=220)
-
-    st.markdown("##### Fotos")
-    novas_fotos = st.file_uploader("Adicionar fotos", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="rf_fotos_upload")
-    if novas_fotos:
-        for arquivo_foto in novas_fotos:
-            try:
-                dados_b64 = base64.b64encode(arquivo_foto.getvalue()).decode("utf-8")
-                if not any(f.get("nome") == arquivo_foto.name and f.get("dados_base64") == dados_b64 for f in st.session_state["rf_fotos_list"]):
-                    st.session_state["rf_fotos_list"].append({"nome": arquivo_foto.name, "legenda": "", "dados_base64": dados_b64})
-            except Exception:
-                pass
-
-    for i_foto, foto in enumerate(st.session_state["rf_fotos_list"]):
-        col_f1, col_f2, col_f3 = st.columns([2, 5, 1])
-        with col_f1:
-            try:
-                st.image(base64.b64decode(foto["dados_base64"]), width=100)
-            except Exception:
-                st.caption("(imagem)")
-        with col_f2:
-            foto["legenda"] = st.text_input(f"Legenda da foto {i_foto+1}", value=foto.get("legenda", ""), key=f"rf_legenda_foto_{i_foto}", label_visibility="collapsed", placeholder=f"Ex: Foto {i_foto+1}: descrição...")
-        with col_f3:
-            if st.button("🗑️", key=f"rf_del_foto_{i_foto}"):
-                st.session_state["rf_fotos_list"].pop(i_foto)
-                st.rerun()
-
-    st.markdown("#### 1.2 - DO VALOR DA MULTA")
-    valor_multa_texto_rf = campo_texto_com_voz("Texto sobre a multa", "rf_valor_multa_texto", altura=100)
-
-    st.markdown("#### 1.3 - DO MATERIAL APREENDIDO")
-    st.caption("Clique em '+' no final da tabela para adicionar linhas, ou selecione e pressione 'Delete' para excluir.")
-    tabela_material_apreendido_rf = st.data_editor(
-        st.session_state.get("rf_material_apreendido_tad") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}],
-        num_rows="dynamic", use_container_width=True, key=f"rf_material_apreendido_editor_{st.session_state.get('rf_id_atual', 'novo')}",
-        column_config={
-            "Nº DO TAD": st.column_config.TextColumn("Nº do TAD"),
-            "DESCRIÇÃO DO MATERIAL": st.column_config.TextColumn("Descrição do Material", width="large"),
-            "DESTINO DO MATERIAL": st.column_config.TextColumn("Destino do Material", width="large"),
-        }
-    )
-
-    st.markdown("#### 1.4 - COMPLEMENTAÇÃO")
-    complementacao_rf = campo_texto_com_voz("Complementação (opcional)", "rf_complementacao", altura=100)
-
-    st.markdown("#### 2. DAS PROVIDÊNCIAS ADMINISTRATIVAS")
-    providencias_rf = campo_texto_com_voz("Providências (uma por linha)", "rf_providencias", altura=150)
-
-    st.markdown("#### Assinatura")
-    col_rf14, col_rf15 = st.columns(2)
-    with col_rf14:
-        municipio_assinatura_rf = st.text_input("Município (assinatura)", value=st.session_state.get("rf_municipio_assinatura", "Miranda (MS)"), key="rf_municipio_assinatura")
-    with col_rf15:
-        data_assinatura_rf = st.date_input("Data da Assinatura", value=datetime.now(), key="rf_data_assinatura")
-    relator_rf = st.selectbox("Relator (Comandante)", EFETIVO[st.session_state["unidade_operacional"]], key="rf_relator")
-    matricula_relator_rf = MATRICULAS.get(relator_rf, "")
-    st.caption(f"Matrícula: {matricula_relator_rf or '— não cadastrada —'}")
-    cargo_relator_rf = st.text_input("Cargo/Função", value=st.session_state.get("rf_cargo_relator", "Cmt. da GU Ambiental/Relator"), key="rf_cargo_relator")
-
-    @st.dialog("Relatório de Fiscalização Salvo")
-    def modal_rf_finalizado(id_relatorio, numero_relatorio):
-        st.success(f"✅ Relatório {numero_relatorio} finalizado e gravado com sucesso na nuvem do Pelotão!")
-        st.caption("Os dados continuam na tela até você clicar em Concluir — pode imprimir quantas vezes precisar antes disso.")
-
-        if st.session_state.get("_disparar_impressao_rf"):
-            components.html("<script>window.parent.print();</script>", height=0)
-            st.session_state["_disparar_impressao_rf"] = False
-
-        col_rfm1, col_rfm2 = st.columns(2)
-        with col_rfm1:
-            if st.button("🖨️ Imprimir / Salvar em PDF", use_container_width=True, key="rf_modal_imprimir"):
-                registrar_auditoria(id_relatorio, "fiscalizacao", "Impressão", st.session_state.get("usuario_conectado", ""))
-                st.session_state["_disparar_impressao_rf"] = True
-                st.rerun()
-        with col_rfm2:
-            if st.button("✅ Concluir e Iniciar Novo Relatório", type="primary", use_container_width=True, key="rf_modal_concluir"):
-                for _k in list(st.session_state.keys()):
-                    if _k.startswith("rf_") and _k not in ("rf_geo_formato",):
-                        del st.session_state[_k]
-                st.session_state["relatorio_rf_aguardando_acao"] = None
-                st.rerun()
-
-    if st.session_state.get("relatorio_rf_aguardando_acao"):
-        _dados_modal_rf = st.session_state["relatorio_rf_aguardando_acao"]
-        modal_rf_finalizado(_dados_modal_rf["id"], _dados_modal_rf["numero"])
-
-    col_salvar_rf1, col_salvar_rf2 = st.columns(2)
-    with col_salvar_rf1:
-        salvar_rascunho_rf = st.button("💾 Salvar Rascunho (continuar depois)", use_container_width=True)
-    with col_salvar_rf2:
-        finalizar_rf = st.button("✅ Finalizar Relatório de Fiscalização", type="primary", use_container_width=True)
-
-    if salvar_rascunho_rf or finalizar_rf:
-        dados_rf = {
-            "interessado": interessado_rf, "nome_autuado": nome_autuado_rf, "cpf_cnpj": cpf_cnpj_rf,
-            "rg_ie": rg_ie_rf, "endereco": endereco_rf, "local_fiscalizacao": local_rf,
-            "data_fiscalizacao": data_fiscalizacao_rf, "coordenadas": coordenadas_rf, "municipio": municipio_rf,
-            "latitude": lat_rf, "longitude": lon_rf, "area_poligono": area_geojson_rf,
-            "telefone": telefone_rf, "legislacao": legislacao_rf, "auto_infracao_nr": auto_infracao_nr_rf,
-            "laudo_constatacao_nr": laudo_constatacao_nr_rf, "termo_paralisacao_nr": termo_paralisacao_nr_rf,
-            "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
-            "bo_cadg_nr": bo_cadg_nr_rf, "fatos_historico": fatos_historico_rf,
-            "termo_apreensao_nr": termo_apreensao_nr_rf, "termo_fiel_depositario_nr": termo_fiel_depositario_nr_rf,
-            "material_apreendido_tad": json.dumps(tabela_material_apreendido_rf, ensure_ascii=False),
-            "complementacao": complementacao_rf,
-            "fotos": json.dumps(st.session_state["rf_fotos_list"], ensure_ascii=False),
-            "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
-            "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
-            "relator": relator_rf, "matricula_relator": matricula_relator_rf, "cargo_relator": cargo_relator_rf,
-            "status": "Finalizado" if finalizar_rf else "Em Andamento"
-        }
-        if not st.session_state["rf_id_atual"]:
-            ano_rf = data_fiscalizacao_rf.year
-            sequencial_rf = proximo_numero_fiscalizacao(st.session_state["unidade_operacional"], ano_rf)
-            designacao_rf = DESIGNACAO_UNIDADE_FISCALIZACAO.get(st.session_state["unidade_operacional"], "")
-            numero_rf = formatar_numero_fiscalizacao(sequencial_rf, designacao_rf, ano_rf)
-            dados_rf["numero"] = numero_rf
-            dados_rf["sequencial"] = sequencial_rf
-            dados_rf["ano"] = ano_rf
-            dados_rf["unidade"] = st.session_state["unidade_operacional"]
-
-        novo_id_rf, erro_rf = salvar_relatorio_fiscalizacao(
-            dados_rf, id_existente=st.session_state["rf_id_atual"], usuario_atual=st.session_state.get("usuario_conectado", "")
-        )
-        if erro_rf:
-            st.error(f"Falha ao salvar: {erro_rf}")
-        else:
-            st.session_state["rf_id_atual"] = novo_id_rf
-            if not st.session_state.get("rf_numero_atual"):
-                st.session_state["rf_numero_atual"] = dados_rf.get("numero")
-
-            if finalizar_rf:
-                st.session_state["relatorio_rf_aguardando_acao"] = {"id": novo_id_rf, "numero": st.session_state["rf_numero_atual"]}
-                st.rerun()
-            else:
-                st.success(f"💾 Rascunho salvo (Nº {st.session_state['rf_numero_atual']}). Pode fechar o sistema com segurança — os dados já estão na nuvem, use a busca acima para retomar depois.")
-
-            dados_rf["numero"] = st.session_state["rf_numero_atual"]
-            buffer_docx = gerar_docx_fiscalizacao(dados_rf)
-            st.download_button(
-                "⬇️ Baixar Documento (.docx)", buffer_docx,
-                file_name=f"Relatorio_Fiscalizacao_{st.session_state['rf_numero_atual'].replace('/', '-')}.docx",
-                use_container_width=True
+        st.markdown("#### DA INFRAÇÃO/FISCALIZAÇÃO")
+        col_rf3, col_rf4 = st.columns(2)
+        with col_rf3:
+            local_rf = st.text_area("05 - Local", key="rf_local", height=70)
+            st.markdown(
+                f'<div class="print-only-text"><strong>Local:</strong><br>{html.escape(local_rf or "—").replace(chr(10), "<br>")}</div>',
+                unsafe_allow_html=True
             )
+        with col_rf4:
+            data_fiscalizacao_rf = st.date_input("06 - Data", value=datetime.now(), key="rf_data_fiscalizacao")
+        col_rf6, col_rf7 = st.columns(2)
+        with col_rf6:
+            municipio_rf = st.selectbox("08 - Município", ["Miranda", "Bodoquena", "Anastácio", "Aquidauana", "Corumbá", "Bonito", "Jardim", "Outros"], key="rf_municipio")
+        with col_rf7:
+            telefone_rf = st.text_input("09 - Telefone", key="rf_telefone")
+
+        lat_rf, lon_rf, coordenadas_rf, area_geojson_rf = campo_geolocalizacao("rf_geo", permitir_area=True)
+
+        st.markdown("#### LEGISLAÇÃO APLICÁVEL")
+        legislacao_rf = campo_texto_com_voz("10 - Legislação (um artigo por linha)", "rf_legislacao", altura=100)
+
+        st.markdown("#### FORMULÁRIOS IMASUL")
+        col_rf8, col_rf9 = st.columns(2)
+        with col_rf8:
+            auto_infracao_nr_rf = st.text_input("Auto de Infração nº", key="rf_auto_infracao_nr")
+        with col_rf9:
+            laudo_constatacao_nr_rf = st.text_input("Laudo de Constatação nº", key="rf_laudo_constatacao_nr")
+        col_rf10, col_rf11 = st.columns(2)
+        with col_rf10:
+            termo_paralisacao_nr_rf = st.text_input("Termo de Paralisação nº", key="rf_termo_paralisacao_nr")
+        with col_rf11:
+            notificacao_nr_rf = st.text_input("Notificação nº", key="rf_notificacao_nr")
+        col_rf12, col_rf13 = st.columns(2)
+        with col_rf12:
+            folhas_complementares_rf = st.number_input("Folhas Complementares (quantidade)", min_value=0, step=1, key="rf_folhas_complementares")
+        with col_rf13:
+            bo_cadg_nr_rf = st.text_input("BO CADG nº", key="rf_bo_cadg_nr")
+        col_rf14, col_rf15 = st.columns(2)
+        with col_rf14:
+            termo_apreensao_nr_rf = st.text_input("Termo de Apreensão nº", key="rf_termo_apreensao_nr")
+        with col_rf15:
+            termo_fiel_depositario_nr_rf = st.text_input("Termo de Fiel Depositário nº", key="rf_termo_fiel_depositario_nr")
+
+        st.markdown("#### 1.1 - DO HISTÓRICO")
+        fatos_historico_rf = campo_texto_com_voz("Histórico", "rf_fatos_historico", altura=220)
+
+        st.markdown("##### Fotos")
+        novas_fotos = st.file_uploader("Adicionar fotos", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="rf_fotos_upload")
+        if novas_fotos:
+            for arquivo_foto in novas_fotos:
+                try:
+                    dados_b64 = base64.b64encode(arquivo_foto.getvalue()).decode("utf-8")
+                    if not any(f.get("nome") == arquivo_foto.name and f.get("dados_base64") == dados_b64 for f in st.session_state["rf_fotos_list"]):
+                        st.session_state["rf_fotos_list"].append({"nome": arquivo_foto.name, "legenda": "", "dados_base64": dados_b64})
+                except Exception:
+                    pass
+
+        for i_foto, foto in enumerate(st.session_state["rf_fotos_list"]):
+            col_f1, col_f2, col_f3 = st.columns([2, 5, 1])
+            with col_f1:
+                try:
+                    st.image(base64.b64decode(foto["dados_base64"]), width=100)
+                except Exception:
+                    st.caption("(imagem)")
+            with col_f2:
+                foto["legenda"] = st.text_input(f"Legenda da foto {i_foto+1}", value=foto.get("legenda", ""), key=f"rf_legenda_foto_{i_foto}", label_visibility="collapsed", placeholder=f"Ex: Foto {i_foto+1}: descrição...")
+            with col_f3:
+                if st.button("🗑️", key=f"rf_del_foto_{i_foto}"):
+                    st.session_state["rf_fotos_list"].pop(i_foto)
+                    st.rerun()
+
+        st.markdown("#### 1.2 - DO VALOR DA MULTA")
+        valor_multa_texto_rf = campo_texto_com_voz("Texto sobre a multa", "rf_valor_multa_texto", altura=100)
+
+        st.markdown("#### 1.3 - DO MATERIAL APREENDIDO")
+        st.caption("Clique em '+' no final da tabela para adicionar linhas, ou selecione e pressione 'Delete' para excluir.")
+        tabela_material_apreendido_rf = st.data_editor(
+            st.session_state.get("rf_material_apreendido_tad") or [{"Nº DO TAD": "", "DESCRIÇÃO DO MATERIAL": "", "DESTINO DO MATERIAL": ""}],
+            num_rows="dynamic", use_container_width=True, key=f"rf_material_apreendido_editor_{st.session_state.get('rf_id_atual', 'novo')}",
+            column_config={
+                "Nº DO TAD": st.column_config.TextColumn("Nº do TAD"),
+                "DESCRIÇÃO DO MATERIAL": st.column_config.TextColumn("Descrição do Material", width="large"),
+                "DESTINO DO MATERIAL": st.column_config.TextColumn("Destino do Material", width="large"),
+            }
+        )
+
+        st.markdown("#### 1.4 - COMPLEMENTAÇÃO")
+        complementacao_rf = campo_texto_com_voz("Complementação (opcional)", "rf_complementacao", altura=100)
+
+        st.markdown("#### 2. DAS PROVIDÊNCIAS ADMINISTRATIVAS")
+        providencias_rf = campo_texto_com_voz("Providências (uma por linha)", "rf_providencias", altura=150)
+
+        st.markdown("#### Assinatura")
+        col_rf14, col_rf15 = st.columns(2)
+        with col_rf14:
+            municipio_assinatura_rf = st.text_input("Município (assinatura)", value=st.session_state.get("rf_municipio_assinatura", "Miranda (MS)"), key="rf_municipio_assinatura")
+        with col_rf15:
+            data_assinatura_rf = st.date_input("Data da Assinatura", value=datetime.now(), key="rf_data_assinatura")
+        relator_rf = st.selectbox("Relator (Comandante)", EFETIVO[st.session_state["unidade_operacional"]], key="rf_relator")
+        matricula_relator_rf = MATRICULAS.get(relator_rf, "")
+        st.caption(f"Matrícula: {matricula_relator_rf or '— não cadastrada —'}")
+        cargo_relator_rf = st.text_input("Cargo/Função", value=st.session_state.get("rf_cargo_relator", "Cmt. da GU Ambiental/Relator"), key="rf_cargo_relator")
+
+        @st.dialog("Relatório de Fiscalização Salvo")
+        def modal_rf_finalizado(id_relatorio, numero_relatorio):
+            st.success(f"✅ Relatório {numero_relatorio} finalizado e gravado com sucesso na nuvem do Pelotão!")
+            st.caption("Os dados continuam na tela até você clicar em Concluir — pode imprimir quantas vezes precisar antes disso.")
+
+            if st.session_state.get("_disparar_impressao_rf"):
+                components.html("<script>window.parent.print();</script>", height=0)
+                st.session_state["_disparar_impressao_rf"] = False
+
+            col_rfm1, col_rfm2 = st.columns(2)
+            with col_rfm1:
+                if st.button("🖨️ Imprimir / Salvar em PDF", use_container_width=True, key="rf_modal_imprimir"):
+                    registrar_auditoria(id_relatorio, "fiscalizacao", "Impressão", st.session_state.get("usuario_conectado", ""))
+                    st.session_state["_disparar_impressao_rf"] = True
+                    st.rerun()
+            with col_rfm2:
+                if st.button("✅ Concluir e Iniciar Novo Relatório", type="primary", use_container_width=True, key="rf_modal_concluir"):
+                    for _k in list(st.session_state.keys()):
+                        if _k.startswith("rf_") and _k not in ("rf_geo_formato",):
+                            del st.session_state[_k]
+                    st.session_state["relatorio_rf_aguardando_acao"] = None
+                    st.rerun()
+
+        if st.session_state.get("relatorio_rf_aguardando_acao"):
+            _dados_modal_rf = st.session_state["relatorio_rf_aguardando_acao"]
+            modal_rf_finalizado(_dados_modal_rf["id"], _dados_modal_rf["numero"])
+
+        col_salvar_rf1, col_salvar_rf2 = st.columns(2)
+        with col_salvar_rf1:
+            salvar_rascunho_rf = st.button("💾 Salvar Rascunho (continuar depois)", use_container_width=True)
+        with col_salvar_rf2:
+            finalizar_rf = st.button("✅ Finalizar Relatório de Fiscalização", type="primary", use_container_width=True)
+
+        if salvar_rascunho_rf or finalizar_rf:
+            dados_rf = {
+                "interessado": interessado_rf, "nome_autuado": nome_autuado_rf, "cpf_cnpj": cpf_cnpj_rf,
+                "rg_ie": rg_ie_rf, "endereco": endereco_rf, "local_fiscalizacao": local_rf,
+                "data_fiscalizacao": data_fiscalizacao_rf, "coordenadas": coordenadas_rf, "municipio": municipio_rf,
+                "latitude": lat_rf, "longitude": lon_rf, "area_poligono": area_geojson_rf,
+                "telefone": telefone_rf, "legislacao": legislacao_rf, "auto_infracao_nr": auto_infracao_nr_rf,
+                "laudo_constatacao_nr": laudo_constatacao_nr_rf, "termo_paralisacao_nr": termo_paralisacao_nr_rf,
+                "notificacao_nr": notificacao_nr_rf, "folhas_complementares": folhas_complementares_rf,
+                "bo_cadg_nr": bo_cadg_nr_rf, "fatos_historico": fatos_historico_rf,
+                "termo_apreensao_nr": termo_apreensao_nr_rf, "termo_fiel_depositario_nr": termo_fiel_depositario_nr_rf,
+                "material_apreendido_tad": json.dumps(tabela_material_apreendido_rf, ensure_ascii=False),
+                "complementacao": complementacao_rf,
+                "fotos": json.dumps(st.session_state["rf_fotos_list"], ensure_ascii=False),
+                "valor_multa_texto": valor_multa_texto_rf, "providencias": providencias_rf,
+                "municipio_assinatura": municipio_assinatura_rf, "data_assinatura": data_assinatura_rf,
+                "relator": relator_rf, "matricula_relator": matricula_relator_rf, "cargo_relator": cargo_relator_rf,
+                "status": "Finalizado" if finalizar_rf else "Em Andamento"
+            }
+            if not st.session_state["rf_id_atual"]:
+                ano_rf = data_fiscalizacao_rf.year
+                sequencial_rf = proximo_numero_fiscalizacao(st.session_state["unidade_operacional"], ano_rf)
+                designacao_rf = DESIGNACAO_UNIDADE_FISCALIZACAO.get(st.session_state["unidade_operacional"], "")
+                numero_rf = formatar_numero_fiscalizacao(sequencial_rf, designacao_rf, ano_rf)
+                dados_rf["numero"] = numero_rf
+                dados_rf["sequencial"] = sequencial_rf
+                dados_rf["ano"] = ano_rf
+                dados_rf["unidade"] = st.session_state["unidade_operacional"]
+
+            novo_id_rf, erro_rf = salvar_relatorio_fiscalizacao(
+                dados_rf, id_existente=st.session_state["rf_id_atual"], usuario_atual=st.session_state.get("usuario_conectado", "")
+            )
+            if erro_rf:
+                st.error(f"Falha ao salvar: {erro_rf}")
+            else:
+                st.session_state["rf_id_atual"] = novo_id_rf
+                if not st.session_state.get("rf_numero_atual"):
+                    st.session_state["rf_numero_atual"] = dados_rf.get("numero")
+
+                if finalizar_rf:
+                    st.session_state["relatorio_rf_aguardando_acao"] = {"id": novo_id_rf, "numero": st.session_state["rf_numero_atual"]}
+                    st.rerun()
+                else:
+                    st.success(f"💾 Rascunho salvo (Nº {st.session_state['rf_numero_atual']}). Pode fechar o sistema com segurança — os dados já estão na nuvem, use a busca acima para retomar depois.")
+
+                dados_rf["numero"] = st.session_state["rf_numero_atual"]
+                buffer_docx = gerar_docx_fiscalizacao(dados_rf)
+                st.download_button(
+                    "⬇️ Baixar Documento (.docx)", buffer_docx,
+                    file_name=f"Relatorio_Fiscalizacao_{st.session_state['rf_numero_atual'].replace('/', '-')}.docx",
+                    use_container_width=True
+                )
 
 # ------------------------------------------
 # VISÃO 2: PAINEL ESTRATÉGICO (ADMIN)
@@ -3251,7 +3470,7 @@ with aba_adm:
 
                     # --- GERENCIAMENTO DE RELATÓRIOS DE FISCALIZAÇÃO AMBIENTAL (as duas unidades) ---
                     st.divider()
-                    with st.expander("📋 Relatórios de Fiscalização Ambiental (buscar, visualizar, editar, excluir)"):
+                    with st.expander("📋 Relatórios de Fiscalização Ambiental — histórico (lançamento desativado)"):
                         if st.session_state.get("carregar_edicao_rf_admin") is not None:
                             _reg_adm = st.session_state.pop("carregar_edicao_rf_admin")
                             for _campo, _chave_ss in [
