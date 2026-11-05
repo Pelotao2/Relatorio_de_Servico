@@ -663,6 +663,62 @@ def mesclar_relatorios_servico(id_origem, id_destino, usuario):
         conn.close()
         return False, str(e)
 
+def excluir_relatorio_servico(id_relatorio, usuario):
+    """Exclui definitivamente um relatório de Serviço (RSD) sem mover produção
+    para nenhum outro — uso restrito ao Admin, para relatórios vazios/criados
+    por engano que não têm nada de aproveitável. Diferente de mesclar, não
+    preserva a numeração: o Nº fica sem registro na sequência."""
+    conn = init_connection()
+    if not conn:
+        return False, "Sem conexão com o banco."
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM relatorios_servico WHERE id = %s;", (id_relatorio,))
+        if cur.rowcount == 0:
+            conn.commit()
+            cur.close()
+            conn.close()
+            return False, "Relatório não encontrado — confira o número."
+        conn.commit()
+        cur.close()
+        conn.close()
+        registrar_auditoria(id_relatorio, "servico", "Exclusão (sem mesclagem — relatório vazio/descartado)", usuario)
+        return True, None
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
+def finalizar_relatorio_servico_cancelado(id_relatorio, numero_substituto, usuario):
+    """Marca um relatório de Serviço vazio/abandonado como 'Cancelado e Refeito',
+    sem apagá-lo e sem mexer em nenhum outro relatório — preserva a posição dele
+    na sequência numérica (diferente de excluir, que deixa um buraco no
+    histórico, e de mesclar, que move produção de um relatório pro outro).
+    Usado quando a guarnição abriu um relatório por engano e já refez o serviço
+    sob outro número."""
+    conn = init_connection()
+    if not conn:
+        return False, "Sem conexão com o banco."
+    try:
+        cur = conn.cursor()
+        nota = f"CANCELADO — relatório refeito sob o Nº {int(numero_substituto):04d}." if numero_substituto else "CANCELADO — relatório vazio, sem produção a aproveitar."
+        cur.execute(
+            "UPDATE relatorios_servico SET status = %s, alteracoes_servico = %s WHERE id = %s;",
+            ("Cancelado e Refeito", nota, id_relatorio)
+        )
+        if cur.rowcount == 0:
+            conn.commit()
+            cur.close()
+            conn.close()
+            return False, "Relatório não encontrado — confira o número."
+        conn.commit()
+        cur.close()
+        conn.close()
+        registrar_auditoria(id_relatorio, "servico", f"Cancelado e Refeito — {nota}", usuario)
+        return True, None
+    except Exception as e:
+        conn.close()
+        return False, str(e)
+
 def encerrar_ordem_manualmente(id_ordem, usuario):
     conn = init_connection()
     if not conn:
@@ -1104,12 +1160,13 @@ def carregar_registro_na_sessao(registro_aberto):
     st.session_state["patrulhamento_fluvial_list"] = json.loads(registro_aberto.get("patrulhamento_fluvial") or "[]")
     st.session_state["viatura_prefixo"] = registro_aberto.get("viatura_prefixo") or ""
     st.session_state["km_inicial_input"] = registro_aberto.get("km_inicial") or 0
-    # Importante: se o relatório já está "Finalizado", o checkbox "Encerrar o
-    # serviço agora" precisa vir marcado — senão o campo KM Final some da tela
-    # (fica desabilitado) e some do session_state, e quem só abriu pra
-    # visualizar/imprimir corre o risco de "perder" o KM Final salvo e ter que
-    # redigitar um valor — o que pode mascarar o KM Rodado real se salvar de novo.
-    if registro_aberto.get("status") == "Finalizado":
+    # Importante: se o relatório já está "Finalizado" (ou "Cancelado e Refeito"
+    # — mesma proteção de edição), o checkbox "Encerrar o serviço agora" precisa
+    # vir marcado — senão o campo KM Final some da tela (fica desabilitado) e
+    # some do session_state, e quem só abriu pra visualizar/imprimir corre o
+    # risco de "perder" o KM Final salvo e ter que redigitar um valor — o que
+    # pode mascarar o KM Rodado real se salvar de novo.
+    if registro_aberto.get("status") != "Em Andamento":
         st.session_state["encerrar_servico_check"] = True
         st.session_state["km_final_input"] = registro_aberto.get("km_final") or 0
     else:
@@ -1595,8 +1652,9 @@ with aba_policial:
                 if resultados_busca:
                     for reg in resultados_busca:
                         st.markdown(f"**Nº {reg['id']:04d}** — {reg.get('comandante','')} — *{reg.get('status','')}*")
-                        if reg.get("status") == "Finalizado":
-                            ajuda("🔒 Relatório finalizado — protegido contra edição. Só o administrador pode liberar.")
+                        if reg.get("status") != "Em Andamento":
+                            _msg_bloqueio = "🔒 Relatório cancelado — protegido contra edição. Só o administrador pode liberar." if reg.get("status") == "Cancelado e Refeito" else "🔒 Relatório finalizado — protegido contra edição. Só o administrador pode liberar."
+                            ajuda(_msg_bloqueio)
                             senha_desbloqueio = st.text_input(
                                 "Senha do administrador para editar", type="password",
                                 key=f"senha_desbloqueio_{reg['id']}", label_visibility="collapsed",
@@ -3314,39 +3372,110 @@ with aba_adm:
                                     st.session_state["rf_adm_id_atual"] = None
                                     st.rerun()
 
-                    # --- CORRIGIR GUARNIÇÃO DUPLICADA (mesclar produção e excluir o relatório errado) ---
+                    # --- CORRIGIR RELATÓRIO DE SERVIÇO (3 opções: excluir / mesclar / finalizar como cancelado) ---
                     st.divider()
-                    with st.expander("🔀 Corrigir Guarnição Duplicada (mesclar produção e excluir)"):
+                    with st.expander("🔀 Corrigir Relatório de Serviço (duplicado, vazio ou abandonado)"):
                         st.caption(
-                            "Use quando alguém criar um relatório novo por engano em vez de continuar o serviço já em "
-                            "andamento (ex.: comandante esqueceu de clicar em 'GU Serviço' e começou do zero). "
-                            "Isso move toda a produção do relatório ERRADO para dentro do relatório CORRETO, "
-                            "soma às atividades que já existirem lá, e apaga o relatório errado. Não tem como desfazer."
+                            "Escolha a ação de acordo com a situação do relatório problemático: "
+                            "se ele está **vazio** (criado por engano, sem nenhuma produção), use **Excluir sem substituir** "
+                            "ou **Finalizar relatório** — a diferença é que Excluir apaga o número da sequência, "
+                            "enquanto Finalizar mantém o número, só marcando como cancelado. "
+                            "Se ele **tem produção de verdade** que precisa ser aproveitada em outro relatório, use **Substituir e excluir** (mesclar)."
                         )
-                        col_merge1, col_merge2 = st.columns(2)
-                        with col_merge1:
-                            id_origem_merge = st.number_input("Nº do relatório ERRADO (será apagado)", min_value=1, step=1, key="merge_id_origem")
-                        with col_merge2:
-                            id_destino_merge = st.number_input("Nº do relatório CORRETO (vai receber a produção)", min_value=1, step=1, key="merge_id_destino")
+                        opcao_correcao = st.radio(
+                            "O que você quer fazer?",
+                            ["🗑️ Excluir sem substituir", "🔀 Substituir e excluir (mesclar)", "✅ Finalizar relatório (cancelado e refeito)"],
+                            key="opcao_correcao_rsd",
+                        )
 
-                        senha_merge = st.text_input("Senha do administrador", type="password", key="merge_senha_admin")
-                        confirmar_merge = st.checkbox(f"Confirmo: apagar o Nº {int(id_origem_merge):04d} e mover tudo para o Nº {int(id_destino_merge):04d}", key="merge_confirmar")
+                        if opcao_correcao == "🗑️ Excluir sem substituir":
+                            st.caption(
+                                "Use para relatório **vazio**, criado por engano, sem nenhuma produção que valha a pena guardar. "
+                                "Apaga o relatório de vez — o número dele fica sem registro na sequência. Não tem como desfazer."
+                            )
+                            id_excluir_rsd = st.number_input("Nº do relatório a excluir", min_value=1, step=1, key="excluir_rsd_id")
+                            senha_excluir_rsd = st.text_input("Senha do administrador", type="password", key="excluir_rsd_senha_admin")
+                            confirmar_excluir_rsd = st.checkbox(f"Confirmo: apagar definitivamente o Nº {int(id_excluir_rsd):04d}", key="excluir_rsd_confirmar")
 
-                        if st.button("🔀 Mesclar e Excluir", type="primary", use_container_width=True, key="btn_executar_merge"):
-                            if senha_merge != USUARIOS_PERMITIDOS.get("admin"):
-                                st.error("Senha de administrador incorreta.")
-                            elif not confirmar_merge:
-                                st.error("Marque a confirmação antes de executar — essa ação não pode ser desfeita.")
-                            else:
-                                _ok_merge, _erro_merge = mesclar_relatorios_servico(
-                                    int(id_origem_merge), int(id_destino_merge), st.session_state.get("usuario_conectado", "")
-                                )
-                                if _ok_merge:
-                                    st.success(f"✅ Produção do Nº {int(id_origem_merge):04d} movida para o Nº {int(id_destino_merge):04d}, e o relatório errado foi excluído.")
-                                    time.sleep(1)
-                                    st.rerun()
+                            if st.button("🗑️ Excluir Definitivamente", type="primary", use_container_width=True, key="btn_executar_excluir_rsd"):
+                                if senha_excluir_rsd != USUARIOS_PERMITIDOS.get("admin"):
+                                    st.error("Senha de administrador incorreta.")
+                                elif not confirmar_excluir_rsd:
+                                    st.error("Marque a confirmação antes de executar — essa ação não pode ser desfeita.")
                                 else:
-                                    st.error(f"Falha ao mesclar: {_erro_merge}")
+                                    _ok_excl, _erro_excl = excluir_relatorio_servico(
+                                        int(id_excluir_rsd), st.session_state.get("usuario_conectado", "")
+                                    )
+                                    if _ok_excl:
+                                        st.success(f"✅ Relatório Nº {int(id_excluir_rsd):04d} excluído definitivamente.")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Falha ao excluir: {_erro_excl}")
+
+                        elif opcao_correcao == "🔀 Substituir e excluir (mesclar)":
+                            st.caption(
+                                "Use quando alguém criar um relatório novo por engano em vez de continuar o serviço já em "
+                                "andamento (ex.: comandante esqueceu de clicar em 'GU Serviço' e começou do zero). "
+                                "Isso move toda a produção do relatório ERRADO para dentro do relatório CORRETO, "
+                                "soma às atividades que já existirem lá, e apaga o relatório errado. Não tem como desfazer."
+                            )
+                            col_merge1, col_merge2 = st.columns(2)
+                            with col_merge1:
+                                id_origem_merge = st.number_input("Nº do relatório ERRADO (será apagado)", min_value=1, step=1, key="merge_id_origem")
+                            with col_merge2:
+                                id_destino_merge = st.number_input("Nº do relatório CORRETO (vai receber a produção)", min_value=1, step=1, key="merge_id_destino")
+
+                            senha_merge = st.text_input("Senha do administrador", type="password", key="merge_senha_admin")
+                            confirmar_merge = st.checkbox(f"Confirmo: apagar o Nº {int(id_origem_merge):04d} e mover tudo para o Nº {int(id_destino_merge):04d}", key="merge_confirmar")
+
+                            if st.button("🔀 Mesclar e Excluir", type="primary", use_container_width=True, key="btn_executar_merge"):
+                                if senha_merge != USUARIOS_PERMITIDOS.get("admin"):
+                                    st.error("Senha de administrador incorreta.")
+                                elif not confirmar_merge:
+                                    st.error("Marque a confirmação antes de executar — essa ação não pode ser desfeita.")
+                                else:
+                                    _ok_merge, _erro_merge = mesclar_relatorios_servico(
+                                        int(id_origem_merge), int(id_destino_merge), st.session_state.get("usuario_conectado", "")
+                                    )
+                                    if _ok_merge:
+                                        st.success(f"✅ Produção do Nº {int(id_origem_merge):04d} movida para o Nº {int(id_destino_merge):04d}, e o relatório errado foi excluído.")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Falha ao mesclar: {_erro_merge}")
+
+                        else:  # Finalizar relatório (cancelado e refeito)
+                            st.caption(
+                                "Use para relatório **vazio ou abandonado** que você quer manter no histórico, sem perder a "
+                                "sequência numérica. Ele passa a aparecer na lista como **'Cancelado e Refeito'** — "
+                                "não apaga nada e não move produção de nenhum outro relatório."
+                            )
+                            id_finalizar_rsd = st.number_input("Nº do relatório a finalizar (cancelar)", min_value=1, step=1, key="finalizar_rsd_id")
+                            id_substituto_rsd = st.number_input(
+                                "Nº do relatório que o substituiu (opcional, 0 se não houver)",
+                                min_value=0, step=1, key="finalizar_rsd_substituto"
+                            )
+                            senha_finalizar_rsd = st.text_input("Senha do administrador", type="password", key="finalizar_rsd_senha_admin")
+                            confirmar_finalizar_rsd = st.checkbox(f"Confirmo: marcar o Nº {int(id_finalizar_rsd):04d} como Cancelado e Refeito", key="finalizar_rsd_confirmar")
+
+                            if st.button("✅ Finalizar como Cancelado e Refeito", type="primary", use_container_width=True, key="btn_executar_finalizar_rsd"):
+                                if senha_finalizar_rsd != USUARIOS_PERMITIDOS.get("admin"):
+                                    st.error("Senha de administrador incorreta.")
+                                elif not confirmar_finalizar_rsd:
+                                    st.error("Marque a confirmação antes de executar.")
+                                else:
+                                    _ok_fin, _erro_fin = finalizar_relatorio_servico_cancelado(
+                                        int(id_finalizar_rsd),
+                                        int(id_substituto_rsd) if id_substituto_rsd else None,
+                                        st.session_state.get("usuario_conectado", "")
+                                    )
+                                    if _ok_fin:
+                                        st.success(f"✅ Relatório Nº {int(id_finalizar_rsd):04d} marcado como Cancelado e Refeito.")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Falha ao finalizar: {_erro_fin}")
 
                     # --- EXPORTAÇÃO EM LOTE: todos os relatórios de um período, num clique ---
                     st.divider()
